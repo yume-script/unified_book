@@ -3,8 +3,8 @@
 **BookOasis의 메타데이터 검색을 한 차원 업그레이드해주는 통합 도서 검색 플러그인입니다.**
 알라딘, 네이버, 구글의 방대한 DB를 하나로 합쳐 가장 정확하고 선명한 도서 정보를 찾아줍니다.
 
-![Main Banner/Demo](이미지주소_여기에_넣으세요)
-
+![설정화면](/images/setting.png)
+![검색화면](/images/search.png)
 ---
 
 ## ✨ 주요 특징 (Key Features)
