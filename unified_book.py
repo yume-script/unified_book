@@ -18,11 +18,18 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     id = "unified_book"
     name = "Unified BOOK Search"
     version = "1.0.0"
-    
-    # GitHub 자동 업데이트를 위한 주소 (파일이 실제 위치한 RAW 주소여야 합니다)
-    update_url = "https://raw.githubusercontent.com/leeyj/BookOasis_stable/main/plugins/metadata/unified_book.py"
-    
     is_searchable = True
+
+    # 자동 업데이트 설정
+    update_manifest = {
+        "enabled": True,
+        "provider": "github-raw",
+        "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/refs/heads/main",
+        "files": ["unified_book.py", "VERSION"],
+        "version_file": "VERSION",
+        "version_key": "plugin version",
+        "show_sample_update_button": True,
+    }
 
     config_schema = [
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
@@ -33,7 +40,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     ]
 
     def _format_date(self, date_str):
-        """날짜 형식을 YYYY-MM-DD로 표준화"""
         if not date_str: return ""
         digits = re.sub(r'\D', '', date_str)
         if len(digits) >= 8:
@@ -85,10 +91,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     item['cover'] = self._get_high_res_url(item.get('cover'), source_name)
                     item['pubDate'] = self._format_date(item.get('pubDate'))
                     item['title'] = f"[{source_name}] {original_title}"
-                    
                     if 'description' in item:
                         item['description'] = re.sub(r'^\[.*?\]\s*', '', item['description'])
-
                     results.append(item)
                     titles_seen.add(norm)
         return results
@@ -143,10 +147,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         try:
             book = gateway.fetch_one("SELECT file_path, library_id FROM books WHERE id = ?", (book_id,))
             if not book: return False, "도서를 찾을 수 없습니다."
-
             file_path = book['file_path']; library_id = book['library_id']
             cover_url = item_data.get('cover'); cover_filename = None
-
             if cover_url:
                 try:
                     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -162,15 +164,11 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             img.save(dest_path, "WEBP", quality=95)
                     cover_filename = f"{library_id}/{cover_filename}"
                 except: cover_filename = None
-
-            final_summary = re.sub('<[^<]+?>', '', item_data.get('description', ''))
-            final_title = re.sub(r'^\[.*?\]\s*', '', item_data.get('title', ''))
-
             gateway.execute(
                 """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
                    release_date = ?, cover_image = COALESCE(NULLIF(?, ''), cover_image),
                    cover_updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                (item_data.get('author'), item_data.get('publisher'), final_summary, 
+                (item_data.get('author'), item_data.get('publisher'), re.sub('<[^<]+?>', '', item_data.get('description', '')), 
                  item_data.get('link'), item_data.get('pubDate'), cover_filename, book_id)
             )
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
