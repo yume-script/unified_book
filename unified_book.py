@@ -16,8 +16,12 @@ from plugins.metadata.base import BaseMetadataProvider
 
 class UnifiedBookMetadataProvider(BaseMetadataProvider):
     id = "unified_book"
-    name = "Unified BOOK Search (V20260715_05)"
-    version = "V20260715_05"
+    name = "Unified BOOK Search"
+    version = "1.0.0"
+    
+    # GitHub 자동 업데이트를 위한 주소 (파일이 실제 위치한 RAW 주소여야 합니다)
+    update_url = "https://raw.githubusercontent.com/leeyj/BookOasis_stable/main/plugins/metadata/unified_book.py"
+    
     is_searchable = True
 
     config_schema = [
@@ -31,14 +35,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     def _format_date(self, date_str):
         """날짜 형식을 YYYY-MM-DD로 표준화"""
         if not date_str: return ""
-        # 숫자만 추출
         digits = re.sub(r'\D', '', date_str)
-        if len(digits) >= 8: # 20240715...
+        if len(digits) >= 8:
             return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
-        elif len(digits) >= 6: # 240715
+        elif len(digits) >= 6:
             prefix = "20" if int(digits[:2]) < 50 else "19"
             return f"{prefix}{digits[:2]}-{digits[2:4]}-{digits[4:6]}"
-        elif len(digits) == 4: # 2024
+        elif len(digits) == 4:
             return f"{digits}-01-01"
         return date_str
 
@@ -80,12 +83,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 norm = "".join(re.findall(r'\w+', original_title)).lower()
                 if norm and norm not in titles_seen:
                     item['cover'] = self._get_high_res_url(item.get('cover'), source_name)
-                    
-                    # UI 표시용 필드 설정 (핵심: pubDate 사용)
                     item['pubDate'] = self._format_date(item.get('pubDate'))
                     item['title'] = f"[{source_name}] {original_title}"
                     
-                    # 설명글에서 출처 제거 (이미 제목에 있으므로)
                     if 'description' in item:
                         item['description'] = re.sub(r'^\[.*?\]\s*', '', item['description'])
 
@@ -163,7 +163,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     cover_filename = f"{library_id}/{cover_filename}"
                 except: cover_filename = None
 
-            # DB 저장용 정리
             final_summary = re.sub('<[^<]+?>', '', item_data.get('description', ''))
             final_title = re.sub(r'^\[.*?\]\s*', '', item_data.get('title', ''))
 
