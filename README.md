@@ -1,4 +1,4 @@
-# 📚 Unified BOOK Search (V20260715)
+# 📚 Unified BOOK Search
 
 **BookOasis의 메타데이터 검색을 한 차원 업그레이드해주는 통합 도서 검색 플러그인입니다.**
 알라딘, 네이버, 구글의 방대한 DB를 하나로 합쳐 가장 정확하고 선명한 도서 정보를 찾아줍니다.
