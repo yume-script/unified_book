@@ -9,6 +9,7 @@ def search_naver(query, cid, csecret):
             data = json.loads(response.read().decode('utf-8'))
             return [{'title': re.sub('<[^<]+?>', '', i.get('title', '')), 'author': i.get('author'),
                      'publisher': i.get('publisher'), 'pubDate': i.get('pubdate'), 
-                     'cover': i.get('image'), 'description': i.get('description', ''), 'link': i.get('link'), 'source': '네이버'} 
+                     'cover': i.get('image'), 'description': i.get('description', ''), 'link': i.get('link'), 'source': '네이버',
+                     'isbn': i.get('isbn', '').split()[-1] if i.get('isbn') else ''} # 복합 ISBN 정제 후 수집 키 추가
                     for i in data.get('items', [])]
     except: return []

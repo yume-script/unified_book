@@ -10,6 +10,7 @@ def search_aladin(query, ttbkey):
             data = json.loads(res)
             return [{'title': i.get('title'), 'author': i.get('author'), 'publisher': i.get('publisher'),
                      'pubDate': i.get('pubDate'), 'cover': i.get('cover'), 
-                     'description': i.get('description', ''), 'link': i.get('link'), 'source': '알라딘'} 
+                     'description': i.get('description', ''), 'link': i.get('link'), 'source': '알라딘',
+                     'isbn': i.get('isbn13') or i.get('isbn', '')} # ISBN 수집용 키 추가
                     for i in data.get('item', [])]
     except: return []
