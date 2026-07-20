@@ -36,7 +36,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     update_manifest = {
         "enabled": True,
         "provider": "github-raw",
-        "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/unified_book",
+        "raw_base_url": "https://raw.githubusercontent.com/<사용자ID>/<리포지토리명>/unified_book",
         "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "utils.py", "__init__.py", "VERSION"],
         "version_file": "VERSION",
         "version_key": "plugin version",
@@ -82,18 +82,18 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 if norm and norm not in titles_seen:
                     item['cover'] = get_high_res_url(item.get('cover'), source_name)
                     
-                    # 1. 날짜 정밀 표준화 및 ISBN 획득
+                    # 1. 날짜 표준화 및 ISBN 정보 확보
                     formatted_date = format_date(item.get('pubDate'))
                     isbn = item.get('isbn', '')
+                    
+                    # 💡 ISBN 값이 있을 때만 뒤에 결합하고, 없을 때는 깔끔하게 출시 날짜만 단독 노출
                     if isbn:
                         item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
                     else:
                         item['pubDate'] = formatted_date
                     
-                    # 2. 제목은 불필요한 메타데이터 없이 원본 유지
+                    # 2. 제목 및 소개글은 잡다한 정보가 추가되지 않은 원래의 깨끗한 텍스트 상태 유지
                     item['title'] = f"[{source_name}] {original_title}"
-                    
-                    # 3. 소개글 본문은 중복 정보나 태그를 모두 뺀 '순수한 원본 설명글' 상태를 유지
                     item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
 
                     results.append(item)
@@ -131,40 +131,29 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     cover_filename = f"{library_id}/{cover_filename}"
                 except: cover_filename = None
 
-            # 💡 DB 클리닝 1: UI용으로 덧붙여둔 ' | ISBN: ...' 문자열을 지우고 깨끗한 출간일 날짜만 추출
+            # UI 노출용으로 뒤에 붙였던 ' | ISBN: ...' 부분에서 순수한 출간일만 분리
             pub_date_raw = item_data.get('pubDate', '')
             clean_pub_date = pub_date_raw.split(" | ISBN:")[0].strip() if pub_date_raw else ''
 
-            # ISBN 표준화 (하이픈 제거 및 대문자 X 정렬)
+            # ISBN 표준화 (특수 문자 및 하이픈 제거 후 대문자 X 정렬)
             raw_isbn = item_data.get('isbn', '')
             clean_isbn = re.sub(r'[^0-9X]', '', str(raw_isbn).upper()) if raw_isbn else ''
 
-            # 💡 DB 클리닝 2: 소개글은 원본 그대로 저장 (더 이상 메타데이터가 중복 저장되지 않음)
+            # 본문 가공 제거를 위한 클리닝
             final_summary = re.sub('<[^<]+?>', '', item_data.get('description', ''))
 
-            # 안전 조치: DB 테이블 정보 조회하여 'isbn' 컬럼 존재 여부 동적 체크
-            columns_info = gateway.fetch_all("PRAGMA table_info(books)")
-            columns = [col['name'].lower() for col in columns_info] if columns_info else []
-            has_isbn_column = 'isbn' in columns
+            # 💡 [보완된 핵심 쿼리]: 
+            # isbn = COALESCE(NULLIF(?, ''), isbn) 구문을 사용하여, 
+            # 이번 검색 결과에 ISBN이 없을 경우 기존 DB에 저장되어 있던 소중한 기존 ISBN 데이터를 덮어씌워 지우지 않고 안전하게 보존합니다.
+            gateway.execute(
+                """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
+                   release_date = ?, isbn = COALESCE(NULLIF(?, ''), isbn), cover_image = COALESCE(NULLIF(?, ''), cover_image),
+                   cover_updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (item_data.get('author'), item_data.get('publisher'), final_summary, 
+                 item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, book_id)
+            )
 
-            if has_isbn_column:
-                gateway.execute(
-                    """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
-                       release_date = ?, isbn = ?, cover_image = COALESCE(NULLIF(?, ''), cover_image),
-                       cover_updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                    (item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, book_id)
-                )
-            else:
-                gateway.execute(
-                    """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
-                       release_date = ?, cover_image = COALESCE(NULLIF(?, ''), cover_image),
-                       cover_updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                    (item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, cover_filename, book_id)
-                )
-
-            return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
+            return True, f"[{item_data.get('source')}] 정보 및 ISBN이 성공적으로 적용되었습니다."
         except Exception as e:
             return False, f"적용 오류: {str(e)}"
 
