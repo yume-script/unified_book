@@ -67,13 +67,12 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     update_manifest = {
         "enabled": True,
         "provider": "github-raw",
-        "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/main/unified_book",
+        "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/refs/heads/main/",
         "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "utils_unified.py", "__init__.py", "VERSION"],
         "version_file": "VERSION",
         "version_key": "plugin version",
         "show_sample_update_button": True,
     }
-
     config_schema = [
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
         {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
