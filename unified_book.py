@@ -34,7 +34,7 @@ try:
     from .google import search_google
     from .utils_unified import (
         format_date, get_high_res_url, validate_isbn13, validate_isbn10, 
-        compare_isbns, extract_isbn_from_epub, extract_isbn_from_pdf, get_row_val
+        compare_isbns, extract_isbn_from_epub, extract_isbn_from_pdf, get_row_val, parse_bool
     )
 except ImportError:
     _aladin_mod = _import_local_module("aladin")
@@ -56,11 +56,12 @@ except ImportError:
     extract_isbn_from_epub = _utils_mod.extract_isbn_from_epub
     extract_isbn_from_pdf = _utils_mod.extract_isbn_from_pdf
     get_row_val = _utils_mod.get_row_val
+    parse_bool = _utils_mod.parse_bool
 
 
 class UnifiedBookMetadataProvider(BaseMetadataProvider):
     id = "unified_book"
-    name = "통합 도서 검색"  # 💡 요청에 맞춰 변경됨
+    name = "통합 도서 검색"
     is_searchable = True
 
     update_manifest = {
@@ -87,8 +88,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             return []
             
         config = self.get_plugin_config(db_type, default={})
-        strict_match = config.get("STRICT_MATCH", False)
-        isbn_file_scan = config.get("ISBN_FILE_SCAN", True)
+        # 💡 보완: parse_bool 헬퍼를 도입하여 문자열 형태의 체크박스 상태도 엄격하게 boolean으로 디코딩
+        strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
+        isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
         
         # 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
         clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
