@@ -7,6 +7,7 @@ import hashlib
 import io
 import zipfile
 import json
+import html  # HTML 엔티티 디코딩용 내장 라이브러리
 import xml.etree.ElementTree as ET
 try:
     from PIL import Image
@@ -15,21 +16,33 @@ except ImportError:
 
 from plugins.metadata.base import BaseMetadataProvider
 
-# 상대 경로 임포트 예외 처리 (코어가 파일을 직접 dynamic load 할 때 발생하는 임포트 에러 해결)
+# 💡 임포트 섀도잉(Import Shadowing) 원천 차단: 절대 경로 기준 동적 모듈 로드 함수 정의
+def _import_local_module(module_name):
+    import importlib.util
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    module_path = os.path.join(current_dir, f"{module_name}.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+# 임포트 안정성 확보 (패키지 로드 실패 시 경로 우회 동적 임포트 실행)
 try:
     from .aladin import search_aladin
     from .naver import search_naver
     from .google import search_google
     from .utils import format_date, get_high_res_url
 except ImportError:
-    import sys
-    _current_dir = os.path.dirname(os.path.abspath(__file__))
-    if _current_dir not in sys.path:
-        sys.path.append(_current_dir)
-    from aladin import search_aladin
-    from naver import search_naver
-    from google import search_google
-    from utils import format_date, get_high_res_url
+    _aladin_mod = _import_local_module("aladin")
+    _naver_mod = _import_local_module("naver")
+    _google_mod = _import_local_module("google")
+    _utils_mod = _import_local_module("utils")
+    
+    search_aladin = _aladin_mod.search_aladin
+    search_naver = _naver_mod.search_naver
+    search_google = _google_mod.search_google
+    format_date = _utils_mod.format_date
+    get_high_res_url = _utils_mod.get_high_res_url
 
 
 # ==========================================
@@ -83,7 +96,7 @@ def compare_isbns(isbn_a, isbn_b):
     return False
 
 def extract_isbn_from_epub(epub_path):
-    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출"""
+    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (엔티티 복원 및 듀얼 스캔 고도화)"""
     try:
         with zipfile.ZipFile(epub_path, 'r') as epub:
             container_content = epub.read('META-INF/container.xml')
@@ -106,7 +119,7 @@ def extract_isbn_from_epub(epub_path):
                     if validate_isbn13(clean) or validate_isbn10(clean):
                         return clean
             
-            # 2단계 백업: 메타데이터에 없을 경우 책 본문 맨 뒤쪽 장(XHTML) 텍스트 분석
+            # 2단계 백업: 본문 XHTML 파일 분석 (앞쪽 8장 + 뒤쪽 8장 대역 확장 분석)
             manifest = {}
             for elem in opf_root.iter():
                 if elem.tag.endswith('item'):
@@ -122,12 +135,19 @@ def extract_isbn_from_epub(epub_path):
                     if idref:
                         spine_item_ids.append(idref)
             
-            last_spines = spine_item_ids[-2:] if len(spine_item_ids) >= 2 else spine_item_ids
+            # 판권지가 앞쪽에 조판되었을 경우를 대비해 전방 8장, 후방 8장 대역 수집
+            num_spines = len(spine_item_ids)
+            target_spines = list(range(min(8, num_spines)))
+            if num_spines > 8:
+                target_spines.extend(list(range(max(8, num_spines - 8), num_spines)))
+            target_spines = sorted(list(set(target_spines)))
+            
             opf_dir = os.path.dirname(opf_path)
-            isbn_pat = re.compile(r'\b(?:97[89][-\s]?)?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,6}[-\s]?[\dX]\b')
+            isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
             isbn10_candidates = []
             
-            for spine_id in last_spines:
+            for idx in target_spines:
+                spine_id = spine_item_ids[idx]
                 href = manifest.get(spine_id)
                 if href:
                     href = urllib.parse.unquote(href)
@@ -135,12 +155,18 @@ def extract_isbn_from_epub(epub_path):
                     full_href = full_href.replace('\\', '/')
                     
                     try:
-                        html_content = epub.read(full_href).decode('utf-8', errors='ignore')
+                        raw_data = epub.read(full_href).decode('utf-8', errors='ignore')
+                        # HTML 엔티티(&nbsp; &#160; 등)를 표준 공백 문자로 복원 디코딩 [1]
+                        html_content = html.unescape(raw_data)
+                        
+                        # HTML 태그 제거
                         text_content = re.sub('<[^<]+?>', '', html_content)
+                        # 유니코드 특수 대시 및 구분 점기호를 표준 하이픈(-)으로 강제 정규화
+                        text_content = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text_content)
                         
                         for match in isbn_pat.findall(text_content):
                             clean = re.sub(r'[^0-9X]', '', match.upper())
-                            if validate_isbn13(clean):
+                            if validate_isbn13(clean) or validate_isbn10(clean):
                                 return clean
                             elif validate_isbn10(clean):
                                 isbn10_candidates.append(clean)
@@ -154,7 +180,7 @@ def extract_isbn_from_epub(epub_path):
     return None
 
 def extract_isbn_from_pdf(pdf_path):
-    """PDF 메타데이터 및 전후면 판권 페이지 고속 타겟 스캔 (맨 뒤 5페이지까지 탐색 범위 확장)"""
+    """PDF 메타데이터 및 전후면 판권 페이지 고속 타겟 스캔 (맨 뒤 15페이지까지 탐색 범위 확장)"""
     try:
         import pypdf
     except ImportError:
@@ -167,19 +193,24 @@ def extract_isbn_from_pdf(pdf_path):
             if num_pages == 0:
                 return None
                 
-            pages_to_scan = list(range(min(5, num_pages)))
-            if num_pages > 5:
-                pages_to_scan.extend(list(range(max(5, num_pages - 5), num_pages)))
+            # 앞쪽 30페이지 수집 (TOC, 서론 등이 긴 책 대비)
+            pages_to_scan = list(range(min(30, num_pages)))
+            # 뒤쪽 수집 범위를 30페이지 전까지 늘려 판권지가 광고 뒤에 숨은 책 검출 성공률 향상
+            if num_pages > 30:
+                pages_to_scan.extend(list(range(max(30, num_pages - 30), num_pages)))
                 
             pages_to_scan = sorted(list(set(pages_to_scan)))
-            isbn_pat = re.compile(r'\b(?:97[89][-\s]?)?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,6}[-\s]?[\dX]\b')
+            isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
             isbn10_candidates = []
             
             for page_idx in pages_to_scan:
                 text = reader.pages[page_idx].extract_text()
                 if not text:
                     continue
-                    
+                
+                # PDF 특유의 인코딩 문제로 인한 유니코드 대시 기호를 표준 하이픈(-)으로 표준화
+                text = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text)
+                
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
                     if validate_isbn13(clean):
@@ -192,6 +223,14 @@ def extract_isbn_from_pdf(pdf_path):
     except Exception:
         pass
     return None
+
+def _get_row_val(row, key, default=''):
+    """💡 sqlite3.Row 및 dict 호환을 위해 에러 없이 안전하게 값을 추출하는 헬퍼"""
+    try:
+        val = row[key]
+        return val if val is not None else default
+    except (KeyError, TypeError, IndexError):
+        return default
 
 
 # ==========================================
@@ -273,19 +312,28 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         # 2. ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
+            
+            # 💡 sqlite3.Row 호출 시 에러 방지용 안전 헬퍼 적용
             book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (query,))
             if not book:
                 book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{query}%",))
                 
+            # 유연한 부분일치 검색 추가 가동
+            if not book:
+                words = [w for w in query.split() if len(w) > 1]
+                if len(words) >= 2:
+                    sub_query = " ".join(words[:2])
+                    book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
+                
             if book:
-                db_isbn = book.get('isbn', '')
+                db_isbn = _get_row_val(book, 'isbn')
                 clean_db_isbn = re.sub(r'[^0-9X]', '', str(db_isbn).upper()) if db_isbn else ''
                 
                 if validate_isbn13(clean_db_isbn) or validate_isbn10(clean_db_isbn):
                     is_isbn = True
                     search_query = clean_db_isbn
                 else:
-                    file_path = book.get('file_path')
+                    file_path = _get_row_val(book, 'file_path')
                     extracted_isbn = None
                     if file_path and os.path.exists(file_path):
                         ext = os.path.splitext(file_path)[1].lower()
@@ -341,7 +389,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         results = []
 
-        # 💡 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
+        # 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
         if is_isbn:
             sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
@@ -350,9 +398,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             ]
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
 
-        # 💡 2차 백업 검색 (Fallback): 
-        # ISBN이 발견되지 않았거나, 추출된 ISBN으로 서점 API 검색 시 결과가 0건인 경우
-        # 자동으로 원래 책 제목("나는 오늘도 메타버스로 출근합니다")으로 2차 검색 실행!
+        # 2차 백업 검색 (Fallback):
+        # ISBN 검색 결과가 0건이거나 실패한 경우 즉시 원본 책 제목 검색으로 Fallback 전환
         if not results:
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
@@ -373,7 +420,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             if not book:
                 return False, "도서를 찾을 수 없습니다."
 
-            file_path, library_id = book['file_path'], book['library_id']
+            file_path = _get_row_val(book, 'file_path')
+            library_id = _get_row_val(book, 'library_id')
             cover_url, cover_filename = item_data.get('cover'), None
 
             if cover_url:
