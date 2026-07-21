@@ -14,6 +14,19 @@ except ImportError:
     PYPDF_AVAILABLE = False
 
 
+def parse_bool(val, default=False):
+    """💡 웹 폼에서 유입되는 다양한 형태의 문자열("false", "off", "0" 등)을 실제 불리언 값으로 강제 정제"""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    val_str = str(val).lower().strip()
+    if val_str in ('true', 'on', '1', 'yes'):
+        return True
+    if val_str in ('false', 'off', '0', 'no', ''):
+        return False
+    return default
+
 def format_date(date_str):
     """날짜 형식을 YYYY-MM-DD로 표준화"""
     if not date_str: return ""
@@ -125,6 +138,7 @@ def extract_isbn_from_epub(epub_path):
                     if idref:
                         spine_item_ids.append(idref)
             
+            # 판권지가 앞쪽에 조판되었을 경우를 대비해 전방 8장, 후방 8장 대역 수집
             num_spines = len(spine_item_ids)
             target_spines = list(range(min(8, num_spines)))
             if num_spines > 8:
