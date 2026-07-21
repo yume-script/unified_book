@@ -83,7 +83,7 @@ def compare_isbns(isbn_a, isbn_b):
     return False
 
 def extract_isbn_from_epub(epub_path):
-    """EPUB 내부 컨테이너 XML 구조 분석 후 식별자 정보 추출"""
+    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출"""
     try:
         with zipfile.ZipFile(epub_path, 'r') as epub:
             container_content = epub.read('META-INF/container.xml')
@@ -99,17 +99,64 @@ def extract_isbn_from_epub(epub_path):
             opf_content = epub.read(opf_path)
             opf_root = ET.fromstring(opf_content)
             
+            # 1단계: 표준 메타데이터 태그(<dc:identifier>)에서 ISBN 탐색
             for elem in opf_root.iter():
                 if elem.tag.endswith('identifier') and elem.text:
                     clean = re.sub(r'[^0-9X]', '', elem.text.upper())
                     if validate_isbn13(clean) or validate_isbn10(clean):
                         return clean
+            
+            # 💡 2단계 백업: 메타데이터에 없을 경우 책 본문 맨 뒤쪽 장(XHTML) 텍스트 분석
+            manifest = {}
+            for elem in opf_root.iter():
+                if elem.tag.endswith('item'):
+                    item_id = elem.attrib.get('id')
+                    href = elem.attrib.get('href')
+                    if item_id and href:
+                        manifest[item_id] = href
+            
+            spine_item_ids = []
+            for elem in opf_root.iter():
+                if elem.tag.endswith('itemref'):
+                    idref = elem.attrib.get('idref')
+                    if idref:
+                        spine_item_ids.append(idref)
+            
+            # 가장 마지막 2개 책장 파일 대상 지정 (판권지 및 아웃트로 수록 구역)
+            last_spines = spine_item_ids[-2:] if len(spine_item_ids) >= 2 else spine_item_ids
+            opf_dir = os.path.dirname(opf_path)
+            isbn_pat = re.compile(r'\b(?:97[89][-\s]?)?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,6}[-\s]?[\dX]\b')
+            isbn10_candidates = []
+            
+            for spine_id in last_spines:
+                href = manifest.get(spine_id)
+                if href:
+                    href = urllib.parse.unquote(href)
+                    full_href = os.path.join(opf_dir, href) if opf_dir else href
+                    full_href = full_href.replace('\\', '/')
+                    
+                    try:
+                        html_content = epub.read(full_href).decode('utf-8', errors='ignore')
+                        # HTML 태그 요소 제거 후 순수 텍스트만 추출
+                        text_content = re.sub('<[^<]+?>', '', html_content)
+                        
+                        for match in isbn_pat.findall(text_content):
+                            clean = re.sub(r'[^0-9X]', '', match.upper())
+                            if validate_isbn13(clean):
+                                return clean
+                            elif validate_isbn10(clean):
+                                isbn10_candidates.append(clean)
+                    except Exception:
+                        pass
+                        
+            if isbn10_candidates:
+                return isbn10_candidates[0]
     except Exception:
         pass
     return None
 
 def extract_isbn_from_pdf(pdf_path):
-    """PDF 메타데이터 및 전후면 판권 페이지 고속 타겟 스캔"""
+    """PDF 메타데이터 및 전후면 판권 페이지 고속 타겟 스캔 (맨 뒤 5페이지까지 탐색 범위 확장)"""
     try:
         import pypdf
     except ImportError:
@@ -122,9 +169,11 @@ def extract_isbn_from_pdf(pdf_path):
             if num_pages == 0:
                 return None
                 
+            # 앞쪽 5페이지 수집
             pages_to_scan = list(range(min(5, num_pages)))
+            # 💡 뒤쪽 수집 범위를 5페이지 전까지 대폭 늘려 광고/빈 면 아래 숨은 판권지를 안정적으로 검출
             if num_pages > 5:
-                pages_to_scan.extend(list(range(max(5, num_pages - 2), num_pages)))
+                pages_to_scan.extend(list(range(max(5, num_pages - 5), num_pages)))
                 
             pages_to_scan = sorted(list(set(pages_to_scan)))
             isbn_pat = re.compile(r'\b(?:97[89][-\s]?)?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,6}[-\s]?[\dX]\b')
@@ -300,9 +349,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     else:
                         item['pubDate'] = formatted_date
                     
-                    # 💡 요구사항 반영: ISBN 검색 성공 시 [출처/ISBN] 접두사를 붙여 식별성 강화
+                    # ISBN이 확인된 도서인 경우 끝부분에 공백과 별표(*)를 표시
                     if is_isbn:
-                        item['title'] = f"[{source_name}/ISBN] {original_title}"
+                        item['title'] = f"[{source_name}/ISBN] {original_title} *"
                     else:
                         item['title'] = f"[{source_name}] {original_title}"
                         
@@ -345,7 +394,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 부분을 날짜 필드에서 다시 정제)
             pub_date_raw = item_data.get('pubDate', '')
-            clean_pub_date = pub_date_raw.split(" | ISBN:")[0].strip() if pub_date_raw else ''
+            # 끝부분에 붙인 별표(*)가 있다면 제거 후 정제
+            clean_pub_date = pub_date_raw.split(" | ISBN:")[0].replace(" *", "").strip() if pub_date_raw else ''
 
             # ISBN 표준화 (특수 문자 및 하이픈 제거 후 대문자 X 정렬)
             raw_isbn = item_data.get('isbn', '')
