@@ -106,7 +106,7 @@ def extract_isbn_from_epub(epub_path):
                     if validate_isbn13(clean) or validate_isbn10(clean):
                         return clean
             
-            # 💡 2단계 백업: 메타데이터에 없을 경우 책 본문 맨 뒤쪽 장(XHTML) 텍스트 분석
+            # 2단계 백업: 메타데이터에 없을 경우 책 본문 맨 뒤쪽 장(XHTML) 텍스트 분석
             manifest = {}
             for elem in opf_root.iter():
                 if elem.tag.endswith('item'):
@@ -122,7 +122,6 @@ def extract_isbn_from_epub(epub_path):
                     if idref:
                         spine_item_ids.append(idref)
             
-            # 가장 마지막 2개 책장 파일 대상 지정 (판권지 및 아웃트로 수록 구역)
             last_spines = spine_item_ids[-2:] if len(spine_item_ids) >= 2 else spine_item_ids
             opf_dir = os.path.dirname(opf_path)
             isbn_pat = re.compile(r'\b(?:97[89][-\s]?)?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,6}[-\s]?[\dX]\b')
@@ -137,7 +136,6 @@ def extract_isbn_from_epub(epub_path):
                     
                     try:
                         html_content = epub.read(full_href).decode('utf-8', errors='ignore')
-                        # HTML 태그 요소 제거 후 순수 텍스트만 추출
                         text_content = re.sub('<[^<]+?>', '', html_content)
                         
                         for match in isbn_pat.findall(text_content):
@@ -169,9 +167,7 @@ def extract_isbn_from_pdf(pdf_path):
             if num_pages == 0:
                 return None
                 
-            # 앞쪽 5페이지 수집
             pages_to_scan = list(range(min(5, num_pages)))
-            # 💡 뒤쪽 수집 범위를 5페이지 전까지 대폭 늘려 광고/빈 면 아래 숨은 판권지를 안정적으로 검출
             if num_pages > 5:
                 pages_to_scan.extend(list(range(max(5, num_pages - 5), num_pages)))
                 
@@ -267,6 +263,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             
         config = self.get_plugin_config(db_type, default={})
         strict_match = config.get("STRICT_MATCH", False)
+        norm_query = "".join(re.findall(r'\w+', query.replace('_', ''))).lower()
         
         # 1. 입력받은 기본 검색어가 이미 유효한 ISBN 구성인지 우선 감지
         clean_query = re.sub(r'[^0-9X]', '', query.upper())
@@ -284,12 +281,10 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 db_isbn = book.get('isbn', '')
                 clean_db_isbn = re.sub(r'[^0-9X]', '', str(db_isbn).upper()) if db_isbn else ''
                 
-                # DB에 유효한 ISBN이 이미 존재한다면 그것을 최우선 검색어로 지정
                 if validate_isbn13(clean_db_isbn) or validate_isbn10(clean_db_isbn):
                     is_isbn = True
                     search_query = clean_db_isbn
                 else:
-                    # DB에 빈 값인 경우, 호스트 내 실제 도서 문서 파일로부터 ISBN 추출을 시도
                     file_path = book.get('file_path')
                     extracted_isbn = None
                     if file_path and os.path.exists(file_path):
@@ -303,63 +298,69 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         is_isbn = True
                         search_query = extracted_isbn
 
-        # 3. 분석 결과(ISBN 여부)에 따른 지능형 API 라우터 맵핑
+        # 3. 내부 검색 수행 전용 헬퍼 함수
+        def _execute_search(sources, s_query, is_isbn_mode):
+            res = []
+            titles_seen = set()
+            for source_name, func, args in sources:
+                if source_name != '구글' and not all(args): 
+                    continue
+                
+                for item in func(s_query, *args):
+                    if is_isbn_mode:
+                        item_isbn = item.get('isbn', '')
+                        if not compare_isbns(s_query, item_isbn):
+                            continue
+                    
+                    original_title = item.get('title', '')
+                    if not is_isbn_mode and strict_match and norm_query:
+                        if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
+                            continue
+
+                    norm = "".join(re.findall(r'\w+', original_title)).lower()
+                    if norm and norm not in titles_seen:
+                        item['cover'] = get_high_res_url(item.get('cover'), source_name)
+                        
+                        formatted_date = format_date(item.get('pubDate'))
+                        isbn = item.get('isbn', '')
+                        if isbn:
+                            item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
+                        else:
+                            item['pubDate'] = formatted_date
+                        
+                        if is_isbn_mode:
+                            item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                        else:
+                            item['title'] = f"[{source_name}] {original_title}"
+                            
+                        item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
+
+                        res.append(item)
+                        titles_seen.add(norm)
+            return res
+
+        results = []
+
+        # 💡 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
         if is_isbn:
-            sources = [
+            sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
                 ('네이버', search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
                 ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
             ]
-        else:
-            sources = [
+            results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
+
+        # 💡 2차 백업 검색 (Fallback): 
+        # ISBN이 발견되지 않았거나, 추출된 ISBN으로 서점 API 검색 시 결과가 0건인 경우
+        # 자동으로 원래 책 제목("나는 오늘도 메타버스로 출근합니다")으로 2차 검색 실행!
+        if not results:
+            sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
                 ('네이버', search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
                 ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
             ]
+            results = _execute_search(sources_title, query, is_isbn_mode=False)
 
-        results = []
-        titles_seen = set()
-        norm_query = "".join(re.findall(r'\w+', query.replace('_', ''))).lower()
-
-        for source_name, func, args in sources:
-            if source_name != '구글' and not all(args): 
-                continue
-            
-            for item in func(search_query, *args):
-                # 정밀 ISBN 검색 활성화 시 불일치 오탐지 도서 차단
-                if is_isbn:
-                    item_isbn = item.get('isbn', '')
-                    if not compare_isbns(search_query, item_isbn):
-                        continue
-                
-                original_title = item.get('title', '')
-                
-                if not is_isbn and strict_match and norm_query:
-                    if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
-                        continue
-
-                norm = "".join(re.findall(r'\w+', original_title)).lower()
-                if norm and norm not in titles_seen:
-                    item['cover'] = get_high_res_url(item.get('cover'), source_name)
-                    
-                    formatted_date = format_date(item.get('pubDate'))
-                    isbn = item.get('isbn', '')
-                    if isbn:
-                        item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
-                    else:
-                        item['pubDate'] = formatted_date
-                    
-                    # ISBN이 확인된 도서인 경우 끝부분에 공백과 별표(*)를 표시
-                    if is_isbn:
-                        item['title'] = f"[{source_name}/ISBN] {original_title} *"
-                    else:
-                        item['title'] = f"[{source_name}] {original_title}"
-                        
-                    item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
-
-                    results.append(item)
-                    titles_seen.add(norm)
-        
         return results
 
     def apply(self, db_type, book_id, item_data):
@@ -392,9 +393,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     cover_filename = f"{library_id}/{cover_filename}"
                 except: cover_filename = None
 
-            # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 부분을 날짜 필드에서 다시 정제)
+            # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
             pub_date_raw = item_data.get('pubDate', '')
-            # 끝부분에 붙인 별표(*)가 있다면 제거 후 정제
             clean_pub_date = pub_date_raw.split(" | ISBN:")[0].replace(" *", "").strip() if pub_date_raw else ''
 
             # ISBN 표준화 (특수 문자 및 하이픈 제거 후 대문자 X 정렬)
