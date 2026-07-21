@@ -9,7 +9,7 @@ import zipfile
 import json
 import html
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed # 💡 병렬 검색 엔진 탑재
+from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     from PIL import Image
 except ImportError:
@@ -60,7 +60,7 @@ except ImportError:
 
 class UnifiedBookMetadataProvider(BaseMetadataProvider):
     id = "unified_book"
-    name = "Unified BOOK Search"
+    name = "통합 도서 검색"  # 💡 요청에 맞춰 변경됨
     is_searchable = True
 
     update_manifest = {
@@ -78,7 +78,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
         {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
-        {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False}
+        {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
+        {"key": "ISBN_FILE_SCAN", "label": "도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도", "type": "checkbox", "required": False}
     ]
 
     def search(self, db_type, query):
@@ -87,8 +88,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             
         config = self.get_plugin_config(db_type, default={})
         strict_match = config.get("STRICT_MATCH", False)
+        isbn_file_scan = config.get("ISBN_FILE_SCAN", True)
         
-        # 💡 개선 1: 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
+        # 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
         clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
         clean_query_base = re.sub(r'\[.*?\]|\(.*?\)', '', clean_query_base).strip()
         if not clean_query_base:
@@ -104,6 +106,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
+            
+            # sqlite3.Row 호출 시 에러 방지용 안전 헬퍼 적용
             book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (query,))
             if not book:
                 book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{query}%",))
@@ -123,20 +127,22 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     is_isbn = True
                     search_query = clean_db_isbn
                 else:
-                    file_path = get_row_val(book, 'file_path')
-                    extracted_isbn = None
-                    if file_path and os.path.exists(file_path):
-                        ext = os.path.splitext(file_path)[1].lower()
-                        if ext == '.epub':
-                            extracted_isbn = extract_isbn_from_epub(file_path)
-                        elif ext == '.pdf':
-                            extracted_isbn = extract_isbn_from_pdf(file_path)
-                            
-                    if extracted_isbn:
-                        is_isbn = True
-                        search_query = extracted_isbn
+                    # 파일 실시간 스캔 옵션이 켜져 있을 때만 EPUB/PDF의 무거운 헤더 디코딩을 진행함
+                    if isbn_file_scan:
+                        file_path = get_row_val(book, 'file_path')
+                        extracted_isbn = None
+                        if file_path and os.path.exists(file_path):
+                            ext = os.path.splitext(file_path)[1].lower()
+                            if ext == '.epub':
+                                extracted_isbn = extract_isbn_from_epub(file_path)
+                            elif ext == '.pdf':
+                                extracted_isbn = extract_isbn_from_pdf(file_path)
+                                
+                        if extracted_isbn:
+                            is_isbn = True
+                            search_query = extracted_isbn
 
-        # 💡 개선 2: ThreadPoolExecutor 기반 비동기 병렬 호출 구조 설계
+        # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
             res = []
             titles_seen = set()
@@ -157,7 +163,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     try:
                         items = future.result()
                     except Exception:
-                        # 특정 소스 호출 에러 시 전체 작동 실패를 방지하고 개별 건너뜀 처리
                         continue
                     
                     for item in items:
@@ -186,7 +191,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                                 item['title'] = f"[{source_name}/ISBN] {original_title} *"
                             else:
                                 item['title'] = f"[{source_name}] {original_title}"
-                                
+                            
                             item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
 
                             res.append(item)
@@ -205,7 +210,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
 
         # 2차 백업 검색 (Fallback):
-        # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원본 책 제목 검색으로 Fallback 전환
+        # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원래 책 제목 검색으로 Fallback 전환
         if not results:
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
@@ -263,7 +268,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             columns = [col['name'].lower() for col in columns_info] if columns_info else []
             has_isbn_column = 'isbn' in columns
 
-            # 💡 개선 3: CASE WHEN 조건문을 적용하여, 새로운 커버 이미지가 실제로 성공적으로 반영되었을 때만 cover_updated_at 갱신
+            # CASE WHEN 조건문을 적용하여, 새로운 커버 이미지가 실제로 성공적으로 반영되었을 때만 cover_updated_at 갱신
             if has_isbn_column:
                 gateway.execute(
                     """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
