@@ -5,6 +5,11 @@ import urllib.request
 import urllib.parse
 import hashlib
 import io
+import zipfile
+import json
+import html
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed # 💡 병렬 검색 엔진 탑재
 try:
     from PIL import Image
 except ImportError:
@@ -12,7 +17,7 @@ except ImportError:
 
 from plugins.metadata.base import BaseMetadataProvider
 
-# 💡 임포트 섀도잉(Import Shadowing) 원천 차단 및 새로운 utils_unified 동적 로드 지원
+# 임포트 섀도잉(Import Shadowing) 원천 차단 및 새로운 utils_unified 동적 로드 지원
 def _import_local_module(module_name):
     import importlib.util
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -82,18 +87,23 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             
         config = self.get_plugin_config(db_type, default={})
         strict_match = config.get("STRICT_MATCH", False)
-        norm_query = "".join(re.findall(r'\w+', query.replace('_', ''))).lower()
         
-        # 1. 입력받은 기본 검색어가 이미 유효한 ISBN 구성인지 우선 감지
+        # 💡 개선 1: 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
+        clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
+        clean_query_base = re.sub(r'\[.*?\]|\(.*?\)', '', clean_query_base).strip()
+        if not clean_query_base:
+            clean_query_base = query
+
+        norm_query = "".join(re.findall(r'\w+', clean_query_base.replace('_', ''))).lower()
+        
+        # 입력받은 기본 검색어가 이미 유효한 ISBN 구성인지 우선 감지
         clean_query = re.sub(r'[^0-9X]', '', query.upper())
         is_isbn = validate_isbn13(clean_query) or validate_isbn10(clean_query)
         search_query = clean_query if is_isbn else query
 
-        # 2. ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
+        # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
-            
-            # 이관된 get_row_val 보조 함수 기반 안전 조회 장치 작동
             book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (query,))
             if not book:
                 book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{query}%",))
@@ -126,45 +136,61 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         is_isbn = True
                         search_query = extracted_isbn
 
-        # 3. 내부 검색 수행 전용 헬퍼 함수
+        # 💡 개선 2: ThreadPoolExecutor 기반 비동기 병렬 호출 구조 설계
         def _execute_search(sources, s_query, is_isbn_mode):
             res = []
             titles_seen = set()
-            for source_name, func, args in sources:
-                if source_name != '구글' and not all(args): 
-                    continue
+            
+            # 워커 스레드를 할당하여 API를 동시 다발적으로 호출
+            futures = {}
+            with ThreadPoolExecutor(max_workers=len(sources)) as executor:
+                for source_name, func, args in sources:
+                    if source_name != '구글' and not all(args): 
+                        continue
+                    # 비동기 백그라운드 쿼리 등록
+                    future = executor.submit(func, s_query, *args)
+                    futures[future] = source_name
                 
-                for item in func(s_query, *args):
-                    if is_isbn_mode:
-                        item_isbn = item.get('isbn', '')
-                        if not compare_isbns(s_query, item_isbn):
-                            continue
+                # 먼저 완성되는 결과부터 실시간 데이터 정합성 검증 적용
+                for future in as_completed(futures):
+                    source_name = futures[future]
+                    try:
+                        items = future.result()
+                    except Exception:
+                        # 특정 소스 호출 에러 시 전체 작동 실패를 방지하고 개별 건너뜀 처리
+                        continue
                     
-                    original_title = item.get('title', '')
-                    if not is_isbn_mode and strict_match and norm_query:
-                        if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
-                            continue
-
-                    norm = "".join(re.findall(r'\w+', original_title)).lower()
-                    if norm and norm not in titles_seen:
-                        item['cover'] = get_high_res_url(item.get('cover'), source_name)
-                        
-                        formatted_date = format_date(item.get('pubDate'))
-                        isbn = item.get('isbn', '')
-                        if isbn:
-                            item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
-                        else:
-                            item['pubDate'] = formatted_date
-                        
+                    for item in items:
                         if is_isbn_mode:
-                            item['title'] = f"[{source_name}/ISBN] {original_title} *"
-                        else:
-                            item['title'] = f"[{source_name}] {original_title}"
-                            
-                        item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
+                            item_isbn = item.get('isbn', '')
+                            if not compare_isbns(s_query, item_isbn):
+                                continue
+                        
+                        original_title = item.get('title', '')
+                        if not is_isbn_mode and strict_match and norm_query:
+                            if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
+                                continue
 
-                        res.append(item)
-                        titles_seen.add(norm)
+                        norm = "".join(re.findall(r'\w+', original_title)).lower()
+                        if norm and norm not in titles_seen:
+                            item['cover'] = get_high_res_url(item.get('cover'), source_name)
+                            
+                            formatted_date = format_date(item.get('pubDate'))
+                            isbn = item.get('isbn', '')
+                            if isbn:
+                                item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
+                            else:
+                                item['pubDate'] = formatted_date
+                            
+                            if is_isbn_mode:
+                                item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                            else:
+                                item['title'] = f"[{source_name}] {original_title}"
+                                
+                            item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
+
+                            res.append(item)
+                            titles_seen.add(norm)
             return res
 
         results = []
@@ -179,14 +205,14 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
 
         # 2차 백업 검색 (Fallback):
-        # ISBN 검색 결과가 0건이거나 실패한 경우 즉시 원래 책 제목 검색으로 Fallback 전환
+        # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원본 책 제목 검색으로 Fallback 전환
         if not results:
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
                 ('네이버', search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
                 ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
             ]
-            results = _execute_search(sources_title, query, is_isbn_mode=False)
+            results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
 
         return results
 
@@ -237,21 +263,24 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             columns = [col['name'].lower() for col in columns_info] if columns_info else []
             has_isbn_column = 'isbn' in columns
 
+            # 💡 개선 3: CASE WHEN 조건문을 적용하여, 새로운 커버 이미지가 실제로 성공적으로 반영되었을 때만 cover_updated_at 갱신
             if has_isbn_column:
                 gateway.execute(
                     """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
                        release_date = ?, isbn = COALESCE(NULLIF(?, ''), isbn), cover_image = COALESCE(NULLIF(?, ''), cover_image),
-                       cover_updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                       cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
+                       WHERE id = ?""",
                     (item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, book_id)
+                     item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, cover_filename, cover_filename, book_id)
                 )
             else:
                 gateway.execute(
                     """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
                        release_date = ?, cover_image = COALESCE(NULLIF(?, ''), cover_image),
-                       cover_updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                       cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
+                       WHERE id = ?""",
                     (item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, cover_filename, book_id)
+                     item_data.get('link'), clean_pub_date, cover_filename, cover_filename, cover_filename, book_id)
                 )
 
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
