@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
 import re
-import sys
 import zipfile
 import html
 import json
@@ -110,13 +109,23 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
     # gemini-3.5-flash-lite 모델을 활용해 속도 및 비용 최적화 (2026년 7월 21일 출시 모델)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
     
-    # 잡담을 배제하고 오직 규정된 스키마의 JSON 오브젝트만 반환하도록 기계적 설계
     prompt = (
         "다음 도서 판권지/본문 텍스트에서 ISBN 번호만 추출해줘.\n"
         "출력은 반드시 다른 미사여구 없이 JSON 형식으로만 해야 하며, 그 구조는 반드시 다음 스키마를 따라야 해:\n"
         "{\"isbn\": \"공백이나 하이픈을 제거한 오직 10자리 또는 13자리 숫자(마지막 X 허용) 문자열 (발견되지 않으면 빈 문자열)\"}\n\n"
         f"[텍스트 본문]\n{text}"
     )
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.1,
+            "maxOutputTokens": 100
+        }
+    }
     
     # 1. LiteLLM / OpenAI 호환 모드 연동
     if endpoint and endpoint.strip():
@@ -129,7 +138,7 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.1,
-            "response_format": {"type": "json_object"}  # OpenAI JSON 모드 명시
+            "response_format": {"type": "json_object"}
         }
         
         headers = {'Content-Type': 'application/json'}
@@ -158,18 +167,6 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
     else:
         if not api_key:
             return None
-            
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "temperature": 0.1,
-                "maxOutputTokens": 100
-            }
-        }
-        
         try:
             req = urllib.request.Request(
                 url, 
@@ -197,7 +194,7 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
     return None
 
 def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_model=None):
-    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (지능형 LLM 듀얼 분기 가동)"""
+    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (💡 감지 소스 식별 정보 튜플 반환)"""
     try:
         with zipfile.ZipFile(epub_path, 'r') as epub:
             container_content = epub.read('META-INF/container.xml')
@@ -208,7 +205,7 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                     opf_path = elem.attrib.get('full-path', '')
                     break
             if not opf_path:
-                return None
+                return None, None
             
             opf_content = epub.read(opf_path)
             opf_root = ET.fromstring(opf_content)
@@ -218,7 +215,7 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                 if elem.tag.endswith('identifier') and elem.text:
                     clean = re.sub(r'[^0-9X]', '', elem.text.upper())
                     if validate_isbn13(clean) or validate_isbn10(clean):
-                        return clean
+                        return clean, "LOCAL"
             
             # 2단계 백업: 본문 XHTML 파일 분석 (앞쪽 8장 + 뒤쪽 8장 대역 확장 분석)
             manifest = {}
@@ -267,37 +264,37 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                         for match in isbn_pat.findall(text_content):
                             clean = re.sub(r'[^0-9X]', '', match.upper())
                             if validate_isbn13(clean) or validate_isbn10(clean):
-                                return clean
+                                return clean, "LOCAL"
                             elif validate_isbn10(clean):
                                 isbn10_candidates.append(clean)
                     except Exception:
                         pass
                         
             if isbn10_candidates:
-                return isbn10_candidates[0]
+                return isbn10_candidates[0], "LOCAL"
                 
             # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 LLM 전송 판독
             if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
                 full_text = "\n".join(compiled_texts)[:12000]
                 llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
                 if llm_isbn:
-                    return llm_isbn
+                    return llm_isbn, "AI"
                     
     except Exception:
         pass
-    return None
+    return None, None
 
 def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_model=None):
-    """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (지능형 LLM 듀얼 분기 가동)"""
+    """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (💡 감지 소스 식별 정보 튜플 반환)"""
     if not PYPDF_AVAILABLE:
-        return None
+        return None, None
         
     try:
         with open(pdf_path, 'rb') as f:
             reader = pypdf.PdfReader(f)
             num_pages = len(reader.pages)
             if num_pages == 0:
-                return None
+                return None, None
                 
             pages_to_scan = list(range(min(30, num_pages)))
             if num_pages > 30:
@@ -322,23 +319,23 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
                     if validate_isbn13(clean):
-                        return clean
+                        return clean, "LOCAL"
                     elif validate_isbn10(clean):
                         isbn10_candidates.append(clean)
                         
             if isbn10_candidates:
-                return isbn10_candidates[0]
+                return isbn10_candidates[0], "LOCAL"
                 
             # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 LLM 전송 판독
             if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
                 full_text = "\n".join(compiled_texts)[:12000]
                 llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
                 if llm_isbn:
-                    return llm_isbn
+                    return llm_isbn, "AI"
                     
     except Exception:
         pass
-    return None
+    return None, None
 
 def get_row_val(row, key, default=''):
     """sqlite3.Row 및 dict 호환을 위해 에러 없이 안전하게 값을 추출하는 헬퍼"""
