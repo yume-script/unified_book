@@ -22,7 +22,7 @@
     line-height: 1.45;
 }
 
-/* 💡 가로 배치(옆으로 배치)를 책임지는 핵심 플렉스 레이아웃 */
+/* 가로 배치(옆으로 배치)를 책임지는 핵심 플렉스 레이아웃 */
 .ubs-plugin-field {
     display: flex;
     flex-direction: row; /* 옆으로 배치 */
@@ -30,7 +30,7 @@
     gap: 2rem; /* 좌측 라벨과 우측 입력 컨테이너 간의 가로 여백 */
 }
 
-/* 💡 왼쪽 라벨 고정 너비 및 높이 정렬 조율 */
+/* 왼쪽 라벨 고정 너비 및 높이 정렬 조율 */
 .ubs-plugin-field label:not(.ubs-checkbox-label) {
     width: 180px; /* 고정 너비로 모든 인풋박스의 시작선을 정밀하게 정렬 */
     flex-shrink: 0;
@@ -40,7 +40,7 @@
     padding-top: 0.55rem; /* 인풋 패딩 높이와 글자 위치 균형 조절 */
 }
 
-/* 💡 우측 입력 창 및 힌트 묶음 수직 컨테이너 */
+/* 우측 입력 창 및 힌트 묶음 수직 컨테이너 */
 .ubs-input-container {
     display: flex;
     flex-direction: column;
@@ -75,13 +75,13 @@
     line-height: 1.35;
 }
 
-/* 💡 좌측 정렬용 공백 스페이서 (체크박스 정렬용) */
+/* 좌측 정렬용 공백 스페이서 (체크박스 정렬용) */
 .ubs-label-spacer {
     width: 180px;
     flex-shrink: 0;
 }
 
-/* 💡 체크박스 스타일 */
+/* 체크박스 스타일 */
 .ubs-checkbox-label {
     display: flex !important;
     align-items: center;
