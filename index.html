@@ -37,9 +37,18 @@
     </div>
   </div>
 
+  <!-- 제미나이 API 설정 💡 추가됨 -->
+  <div class="ubs-plugin-field">
+    <label for="ubs-gemini-key">Gemini API Key</label>
+    <div class="ubs-input-container">
+      <input id="ubs-gemini-key" type="password" name="GEMINI_API_KEY" placeholder="AI Studio에서 발급받은 API Key를 입력하세요 (선택)" />
+      <p class="hint">로컬 분석 실패 시 제미나이 AI를 활용해 책 본문에서 ISBN을 역추적합니다. (Google AI Studio에서 무료 발급 가능)</p>
+    </div>
+  </div>
+
   <!-- 체크박스 설정 1: 엄격한 매칭 -->
   <div class="ubs-plugin-field">
-    <div class="ubs-label-spacer"></div> <!-- 왼쪽 라벨 정렬용 공간 확보 -->
+    <div class="ubs-label-spacer"></div>
     <div class="ubs-input-container">
       <label class="ubs-checkbox-label" for="ubs-strict-match">
         <input id="ubs-strict-match" type="checkbox" name="STRICT_MATCH" value="true" />
@@ -51,7 +60,7 @@
 
   <!-- 체크박스 설정 2: 실시간 파일 스캔 -->
   <div class="ubs-plugin-field">
-    <div class="ubs-label-spacer"></div> <!-- 왼쪽 라벨 정렬용 공간 확보 -->
+    <div class="ubs-label-spacer"></div>
     <div class="ubs-input-container">
       <label class="ubs-checkbox-label" for="ubs-isbn-file-scan">
         <input id="ubs-isbn-file-scan" type="checkbox" name="ISBN_FILE_SCAN" value="true" />
