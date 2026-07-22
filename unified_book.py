@@ -17,7 +17,7 @@ except ImportError:
 
 from plugins.metadata.base import BaseMetadataProvider
 
-# 임포트 섀도잉(Import Shadowing) 원천 차단 및 새로운 utils_unified 동적 로드 지원
+# 임포트 섀도잉(Import Shadowing) 원천 차단: 절대 경로 기준 동적 모듈 로더
 def _import_local_module(module_name):
     import importlib.util
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -78,7 +78,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
         {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
-        {"key": "GEMINI_API_KEY", "label": "Gemini API Key", "type": "text", "required": False}, # 💡 추가됨
+        {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
+        {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
+        {"key": "LITELLM_MODEL", "label": "LiteLLM 모델명 (선택)", "type": "text", "required": False},
         {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
         {"key": "ISBN_FILE_SCAN", "label": "도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도", "type": "checkbox", "required": False}
     ]
@@ -90,7 +92,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
-        gemini_key = config.get("GEMINI_API_KEY", "").strip() # 💡 제미나이 키 획득
+        gemini_key = config.get("GEMINI_API_KEY", "").strip()
+        llm_endpoint = config.get("LITELLM_ENDPOINT", "").strip()
+        llm_model = config.get("LITELLM_MODEL", "").strip()
         
         # 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
         clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
@@ -109,7 +113,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
             
-            # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
+            # 💡 sqlite3.Row 호출 시 에러 방지용 안전 헬퍼 및 가공 정제된 clean_query_base 대입 조회 실행
             book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
             if not book:
                 book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
@@ -136,9 +140,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         if file_path and os.path.exists(file_path):
                             ext = os.path.splitext(file_path)[1].lower()
                             if ext == '.epub':
-                                extracted_isbn = extract_isbn_from_epub(file_path, gemini_key=gemini_key) # 💡 제미나이 키 인계
+                                extracted_isbn = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
                             elif ext == '.pdf':
-                                extracted_isbn = extract_isbn_from_pdf(file_path, gemini_key=gemini_key) # 💡 제미나이 키 인계
+                                extracted_isbn = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
                                 
                         if extracted_isbn:
                             is_isbn = True
@@ -212,7 +216,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
 
         # 2차 백업 검색 (Fallback):
-        # ISBN 검색 결과가 없거나 실패한 경우 즉시 원래 책 제목 검색으로 Fallback 전환
+        # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원래 책 제목 검색으로 Fallback 전환
         if not results:
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
