@@ -1,0 +1,103 @@
+.ubs-plugin-panel {
+    background: rgba(15, 23, 42, 0.35);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 10px;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.35rem;
+}
+
+.ubs-plugin-title {
+    color: #f8fafc;
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin-bottom: 0.35rem;
+}
+
+.ubs-plugin-desc {
+    color: #94a3b8;
+    font-size: 0.8rem;
+    margin-bottom: 0.5rem;
+    line-height: 1.45;
+}
+
+/* 💡 가로 배치(옆으로 배치)를 책임지는 핵심 플렉스 레이아웃 */
+.ubs-plugin-field {
+    display: flex;
+    flex-direction: row; /* 옆으로 배치 */
+    align-items: flex-start; /* 인풋 박스와 힌트 정렬 기준을 상단으로 조율 */
+    gap: 2rem; /* 좌측 라벨과 우측 입력 컨테이너 간의 가로 여백 */
+}
+
+/* 💡 왼쪽 라벨 고정 너비 및 높이 정렬 조율 */
+.ubs-plugin-field label:not(.ubs-checkbox-label) {
+    width: 180px; /* 고정 너비로 모든 인풋박스의 시작선을 정밀하게 정렬 */
+    flex-shrink: 0;
+    color: #e2e8f0;
+    font-weight: 700;
+    font-size: 0.86rem;
+    padding-top: 0.55rem; /* 인풋 패딩 높이와 글자 위치 균형 조절 */
+}
+
+/* 💡 우측 입력 창 및 힌트 묶음 수직 컨테이너 */
+.ubs-input-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    flex-grow: 1;
+    max-width: 520px;
+}
+
+.ubs-plugin-field input[type="text"],
+.ubs-plugin-field input[type="password"] {
+    width: 100%;
+    background: rgba(15, 23, 42, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #fff;
+    padding: 0.6rem 0.8rem;
+    border-radius: 6px;
+    outline: none;
+    font-size: 0.85rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.ubs-plugin-field input[type="text"]:focus,
+.ubs-plugin-field input[type="password"]:focus {
+    border-color: #a855f7;
+    box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.2);
+}
+
+.ubs-plugin-field .hint {
+    margin: 0;
+    color: #94a3b8;
+    font-size: 0.76rem;
+    line-height: 1.35;
+}
+
+/* 💡 좌측 정렬용 공백 스페이서 (체크박스 정렬용) */
+.ubs-label-spacer {
+    width: 180px;
+    flex-shrink: 0;
+}
+
+/* 💡 체크박스 스타일 */
+.ubs-checkbox-label {
+    display: flex !important;
+    align-items: center;
+    gap: 0.55rem;
+    cursor: pointer;
+    user-select: none;
+    color: #e2e8f0;
+    font-weight: 700;
+    font-size: 0.86rem;
+    padding: 0;
+}
+
+.ubs-checkbox-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: #a855f7; /* BookOasis 보라색 테마 포인트에 정밀 연동 */
+    cursor: pointer;
+    margin: 0;
+}

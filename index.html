@@ -1,0 +1,63 @@
+<div class="ubs-plugin-panel">
+  <div class="ubs-plugin-title">통합 도서 검색 설정</div>
+  <div class="ubs-plugin-desc">알라딘, 네이버, 구글의 도서 오픈 API 데이터를 동시에 조회하여 책 정보를 한층 더 풍성하게 채워 넣습니다.</div>
+
+  <!-- 알라딘 OpenAPI 설정 -->
+  <div class="ubs-plugin-field">
+    <label for="ubs-aladin-key">알라딘 OpenAPI TTBKey</label>
+    <div class="ubs-input-container">
+      <input id="ubs-aladin-key" type="text" name="ALADIN_KEY" placeholder="예: ttbabcdef123456" />
+      <p class="hint">알라딘 OpenAPI 페이지에서 발급받은 TTBKey를 정확히 입력하세요.</p>
+    </div>
+  </div>
+
+  <!-- 네이버 OpenAPI 설정 -->
+  <div class="ubs-plugin-field">
+    <label for="ubs-naver-id">네이버 Client ID</label>
+    <div class="ubs-input-container">
+      <input id="ubs-naver-id" type="text" name="NAVER_ID" placeholder="네이버 Client ID를 입력하세요" />
+      <p class="hint">네이버 개발자 센터에서 발급받은 애플리케이션 Client ID를 입력하세요.</p>
+    </div>
+  </div>
+
+  <div class="ubs-plugin-field">
+    <label for="ubs-naver-secret">네이버 Client Secret</label>
+    <div class="ubs-input-container">
+      <input id="ubs-naver-secret" type="password" name="NAVER_SECRET" placeholder="네이버 Client Secret을 입력하세요" />
+      <p class="hint">네이버 개발자 센터에서 발급받은 Client Secret 키를 입력하세요.</p>
+    </div>
+  </div>
+
+  <!-- 구글 Books API 설정 -->
+  <div class="ubs-plugin-field">
+    <label for="ubs-google-key">Google Books API Key</label>
+    <div class="ubs-input-container">
+      <input id="ubs-google-key" type="text" name="GOOGLE_API_KEY" placeholder="Google API Key를 입력하세요 (선택)" />
+      <p class="hint">구글 북스 API 키를 입력하세요. API 키가 없어도 일부 무료 한도 내에서 기본 검색이 가능합니다.</p>
+    </div>
+  </div>
+
+  <!-- 체크박스 설정 1: 엄격한 매칭 -->
+  <div class="ubs-plugin-field">
+    <div class="ubs-label-spacer"></div> <!-- 왼쪽 라벨 정렬용 공간 확보 -->
+    <div class="ubs-input-container">
+      <label class="ubs-checkbox-label" for="ubs-strict-match">
+        <input id="ubs-strict-match" type="checkbox" name="STRICT_MATCH" value="true" />
+        <span>검색 결과 엄격한 필터링</span>
+      </label>
+      <p class="hint">체크 시, 검색어 단어 목록이 수집된 도서 제목 내에 실제로 정확하게 포함되어 있는 결과만 통과시킵니다.</p>
+    </div>
+  </div>
+
+  <!-- 체크박스 설정 2: 실시간 파일 스캔 -->
+  <div class="ubs-plugin-field">
+    <div class="ubs-label-spacer"></div> <!-- 왼쪽 라벨 정렬용 공간 확보 -->
+    <div class="ubs-input-container">
+      <label class="ubs-checkbox-label" for="ubs-isbn-file-scan">
+        <input id="ubs-isbn-file-scan" type="checkbox" name="ISBN_FILE_SCAN" value="true" />
+        <span>도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도</span>
+      </label>
+      <p class="hint">체크 시, 매뉴얼 검색창을 열었을 때 실제 도서의 표지 전후방 장들을 열어 판권지 속 ISBN을 추적합니다. (저사양 컴퓨터는 해제를 권장합니다.)</p>
+    </div>
+  </div>
+</div>
