@@ -68,7 +68,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "enabled": True,
         "provider": "github-raw",
         "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/refs/heads/main/",
-        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "utils_unified.py", "__init__.py", "VERSION"],
+        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "utils_unified.py", "index.html", "style.css", "__init__.py", "VERSION"],
         "version_file": "VERSION",
         "version_key": "plugin version",
         "show_sample_update_button": True,
@@ -87,7 +87,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             return []
             
         config = self.get_plugin_config(db_type, default={})
-        # 💡 보완: parse_bool 헬퍼를 도입하여 문자열 형태의 체크박스 상태도 엄격하게 boolean으로 디코딩
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
         
@@ -108,14 +107,14 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
             
-            # sqlite3.Row 호출 시 에러 방지용 안전 헬퍼 적용
-            book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (query,))
+            # 💡 동작 순서 개선: 가공되지 않은 'query' 대신 노이즈가 제거된 'clean_query_base'를 매개변수로 전달하여 검색 정확도와 속도를 대폭 끌어올립니다.
+            book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
             if not book:
-                book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{query}%",))
+                book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
                 
             # 유연한 부분일치 검색 추가 가동
             if not book:
-                words = [w for w in query.split() if len(w) > 1]
+                words = [w for w in clean_query_base.split() if len(w) > 1]
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
                     book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
