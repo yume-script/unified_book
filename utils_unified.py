@@ -3,6 +3,8 @@ import os
 import re
 import zipfile
 import html
+import json
+import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 
@@ -15,7 +17,7 @@ except ImportError:
 
 
 def parse_bool(val, default=False):
-    """💡 웹 폼에서 유입되는 다양한 형태의 문자열("false", "off", "0" 등)을 실제 불리언 값으로 강제 정제"""
+    """웹 폼에서 유입되는 다양한 형태의 문자열을 실제 불리언 값으로 강제 정제"""
     if val is None:
         return default
     if isinstance(val, bool):
@@ -98,8 +100,52 @@ def compare_isbns(isbn_a, isbn_b):
         
     return False
 
-def extract_isbn_from_epub(epub_path):
-    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (엔티티 복원 및 듀얼 스캔 고도화)"""
+def extract_isbn_via_gemini(text, api_key):
+    """💡 구글 Gemini API를 활용한 도서 텍스트 내 ISBN 비동기 정밀 추출"""
+    if not api_key or not text.strip():
+        return None
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    
+    prompt = (
+        "다음 도서 판권지/본문 텍스트에서 ISBN 번호만 추출해줘.\n"
+        "출력값에는 공백, 하이픈, 한글, 영어 등을 모두 배제하고 오직 10자리 또는 13자리의 숫자(마지막 X 허용)로만 구성된 단 하나의 ISBN 값만 반환해줘.\n"
+        "만약 본문에 유효한 ISBN 번호가 존재하지 않는다면 아무 글자도 적지 말고 빈 문자열만 반환해줘.\n\n"
+        f"[텍스트 본문]\n{text}"
+    )
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,  # 일관성 높은 정밀 추출을 위해 온도를 극도로 낮춤
+            "maxOutputTokens": 20
+        }
+    }
+    
+    try:
+        req = urllib.request.Request(
+            url, 
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            candidates = res_data.get('candidates', [])
+            if candidates:
+                parts = candidates[0].get('content', {}).get('parts', [])
+                if parts:
+                    raw_isbn = parts[0].get('text', '').strip()
+                    clean = re.sub(r'[^0-9X]', '', raw_isbn.upper())
+                    if len(clean) in (10, 13):
+                        return clean
+    except Exception:
+        pass
+    return None
+
+def extract_isbn_from_epub(epub_path, gemini_key=None):
+    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (제미나이 자동 Fallback 탑재)"""
     try:
         with zipfile.ZipFile(epub_path, 'r') as epub:
             container_content = epub.read('META-INF/container.xml')
@@ -138,7 +184,6 @@ def extract_isbn_from_epub(epub_path):
                     if idref:
                         spine_item_ids.append(idref)
             
-            # 판권지가 앞쪽에 조판되었을 경우를 대비해 전방 8장, 후방 8장 대역 수집
             num_spines = len(spine_item_ids)
             target_spines = list(range(min(8, num_spines)))
             if num_spines > 8:
@@ -148,6 +193,7 @@ def extract_isbn_from_epub(epub_path):
             opf_dir = os.path.dirname(opf_path)
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
             isbn10_candidates = []
+            compiled_texts = []
             
             for idx in target_spines:
                 spine_id = spine_item_ids[idx]
@@ -159,13 +205,12 @@ def extract_isbn_from_epub(epub_path):
                     
                     try:
                         raw_data = epub.read(full_href).decode('utf-8', errors='ignore')
-                        # HTML 엔티티(&nbsp; &#160; 등)를 표준 공백 문자로 복원 디코딩
                         html_content = html.unescape(raw_data)
-                        
-                        # HTML 태그 제거
                         text_content = re.sub('<[^<]+?>', '', html_content)
-                        # 유니코드 특수 대시 및 구분 점기호를 표준 하이픈(-)으로 강제 정규화
                         text_content = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text_content)
+                        
+                        if text_content.strip():
+                            compiled_texts.append(text_content)
                         
                         for match in isbn_pat.findall(text_content):
                             clean = re.sub(r'[^0-9X]', '', match.upper())
@@ -178,12 +223,20 @@ def extract_isbn_from_epub(epub_path):
                         
             if isbn10_candidates:
                 return isbn10_candidates[0]
+                
+            # 💡 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 제미나이 전송 판독
+            if gemini_key and compiled_texts:
+                full_text = "\n".join(compiled_texts)[:18000] # 토큰 절약 및 타임아웃 방지 임계값 설정
+                gemini_isbn = extract_isbn_via_gemini(full_text, gemini_key)
+                if gemini_isbn:
+                    return gemini_isbn
+                    
     except Exception:
         pass
     return None
 
-def extract_isbn_from_pdf(pdf_path):
-    """PDF 메타데이터 및 전후면 판권 페이지 고속 타겟 스캔 (맨 뒤 15페이지까지 탐색 범위 확장)"""
+def extract_isbn_from_pdf(pdf_path, gemini_key=None):
+    """PDF 메타데이터 및 전후면 판권 페이지 고속 타겟 스캔 (제미나이 자동 Fallback 탑재)"""
     if not PYPDF_AVAILABLE:
         return None
         
@@ -194,15 +247,14 @@ def extract_isbn_from_pdf(pdf_path):
             if num_pages == 0:
                 return None
                 
-            # 앞쪽 30페이지 수집 (TOC, 서론 등이 긴 책 대비)
             pages_to_scan = list(range(min(30, num_pages)))
-            # 뒤쪽 수집 범위를 30페이지 전까지 늘려 판권지가 광고 뒤에 숨은 책 검출 성공률 향상
             if num_pages > 30:
                 pages_to_scan.extend(list(range(max(30, num_pages - 30), num_pages)))
                 
             pages_to_scan = sorted(list(set(pages_to_scan)))
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
             isbn10_candidates = []
+            compiled_texts = []
             
             for page_idx in pages_to_scan:
                 text = reader.pages[page_idx].extract_text()
@@ -211,6 +263,9 @@ def extract_isbn_from_pdf(pdf_path):
                 
                 # PDF 특유의 인코딩 문제로 인한 유니코드 대시 기호를 표준 하이픈(-)으로 표준화
                 text = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text)
+                
+                if text.strip():
+                    compiled_texts.append(text)
                 
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
@@ -221,6 +276,14 @@ def extract_isbn_from_pdf(pdf_path):
                         
             if isbn10_candidates:
                 return isbn10_candidates[0]
+                
+            # 💡 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 제미나이 전송 판독
+            if gemini_key and compiled_texts:
+                full_text = "\n".join(compiled_texts)[:18000]
+                gemini_isbn = extract_isbn_via_gemini(full_text, gemini_key)
+                if gemini_isbn:
+                    return gemini_isbn
+                    
     except Exception:
         pass
     return None
