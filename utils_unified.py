@@ -105,7 +105,7 @@ def extract_isbn_via_gemini(text, api_key):
     if not api_key or not text.strip():
         return None
         
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
     
     prompt = (
         "다음 도서 판권지/본문 텍스트에서 ISBN 번호만 추출해줘.\n"
