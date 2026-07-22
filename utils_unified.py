@@ -109,6 +109,7 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
     # gemini-3.5-flash-lite 모델을 활용해 속도 및 비용 최적화 (2026년 7월 21일 출시 모델)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
     
+    # 잡담을 배제하고 오직 규정된 스키마의 JSON 오브젝트만 반환하도록 기계적 설계
     prompt = (
         "다음 도서 판권지/본문 텍스트에서 ISBN 번호만 추출해줘.\n"
         "출력은 반드시 다른 미사여구 없이 JSON 형식으로만 해야 하며, 그 구조는 반드시 다음 스키마를 따라야 해:\n"
@@ -121,7 +122,7 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "responseMimeType": "application/json",
+            "responseMimeType": "application/json", # 구글 공식 JSON 모드 활성화로 수다스러운 답변 완전 차단
             "temperature": 0.1,
             "maxOutputTokens": 100
         }
@@ -138,7 +139,7 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.1,
-            "response_format": {"type": "json_object"}
+            "response_format": {"type": "json_object"}  # OpenAI JSON 모드 명시
         }
         
         headers = {'Content-Type': 'application/json'}
@@ -194,7 +195,7 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
     return None
 
 def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_model=None):
-    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (💡 감지 소스 식별 정보 튜플 반환)"""
+    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (지능형 LLM 듀얼 분기 가동)"""
     try:
         with zipfile.ZipFile(epub_path, 'r') as epub:
             container_content = epub.read('META-INF/container.xml')
@@ -233,6 +234,7 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                     if idref:
                         spine_item_ids.append(idref)
             
+            # 판권지가 앞쪽에 조판되었을 경우를 대비해 전방 8장, 후방 8장 대역 수집
             num_spines = len(spine_item_ids)
             target_spines = list(range(min(8, num_spines)))
             if num_spines > 8:
@@ -240,6 +242,27 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
             target_spines = sorted(list(set(target_spines)))
             
             opf_dir = os.path.dirname(opf_path)
+            
+            # 💡 [초고속 조기 종료 필터 1]: 만화책/스캔본 전용 EPUB 판별
+            # 앞쪽 3장의 텍스트 정보가 공백 제외 20자 미만인 경우 이미지 중심의 도서로 간주하고 즉시 조기 종료
+            sample_epub_text = ""
+            check_spines = target_spines[:3]
+            for idx in check_spines:
+                spine_id = spine_item_ids[idx]
+                href = manifest.get(spine_id)
+                if href:
+                    href = urllib.parse.unquote(href)
+                    full_href = os.path.join(opf_dir, href) if opf_dir else href
+                    full_href = full_href.replace('\\', '/')
+                    try:
+                        html_data = epub.read(full_href).decode('utf-8', errors='ignore')
+                        text_data = re.sub('<[^<]+?>', '', html.unescape(html_data))
+                        sample_epub_text += text_data.strip()
+                    except Exception:
+                        pass
+            if len(re.sub(r'\s', '', sample_epub_text)) < 20:
+                return None, None  # 이미지 전용책이므로 실시간 수색 종료
+            
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
             isbn10_candidates = []
             compiled_texts = []
@@ -285,7 +308,7 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
     return None, None
 
 def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_model=None):
-    """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (💡 감지 소스 식별 정보 튜플 반환)"""
+    """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (지능형 LLM 듀얼 분기 가동)"""
     if not PYPDF_AVAILABLE:
         return None, None
         
@@ -295,6 +318,24 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
             num_pages = len(reader.pages)
             if num_pages == 0:
                 return None, None
+                
+            # 💡 [초고속 조기 종료 필터 2]: 스캔본(통 이미지) 전용 PDF 판별
+            # 표지를 제외한 본문 초입부(1, 2, 3페이지)에서 임시 텍스트 추출을 먼저 수행해 봅니다.
+            # 이 구역마저 텍스트 데이터가 없다면 OCR이 필요한 스캔본으로 즉시 인지하여 파일 조회를 0.002초 만에 즉각 취소합니다.
+            sample_text = ""
+            check_indices = [idx for idx in [1, 2, 3] if idx < num_pages]
+            if not check_indices:
+                check_indices = [0]
+                
+            for idx in check_indices:
+                try:
+                    p_text = reader.pages[idx].extract_text()
+                    if p_text:
+                        sample_text += p_text.strip()
+                except Exception:
+                    pass
+            if not sample_text.strip():
+                return None, None # 글자가 전혀 긁히지 않는 스캔 도서이므로 실시간 수색 종료
                 
             pages_to_scan = list(range(min(30, num_pages)))
             if num_pages > 30:
@@ -318,7 +359,7 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
-                    if validate_isbn13(clean):
+                    if validate_isbn13(clean) or validate_isbn10(clean):
                         return clean, "LOCAL"
                     elif validate_isbn10(clean):
                         isbn10_candidates.append(clean)
