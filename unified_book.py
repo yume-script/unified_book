@@ -17,7 +17,7 @@ except ImportError:
 
 from plugins.metadata.base import BaseMetadataProvider
 
-# 임포트 섀도잉(Import Shadowing) 원천 차단: 절대 경로 기준 동적 모듈 로더
+# 임포트 섀도잉(Import Shadowing) 원천 차단 및 새로운 utils_unified 동적 로드 지원
 def _import_local_module(module_name):
     import importlib.util
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -108,12 +108,15 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         clean_query = re.sub(r'[^0-9X]', '', query.upper())
         is_isbn = validate_isbn13(clean_query) or validate_isbn10(clean_query)
         search_query = clean_query if is_isbn else query
+        
+        # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
+        detection_source = "INPUT" if is_isbn else None
 
         # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
             
-            # 💡 sqlite3.Row 호출 시 에러 방지용 안전 헬퍼 및 가공 정제된 clean_query_base 대입 조회 실행
+            # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
             book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
             if not book:
                 book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
@@ -132,21 +135,23 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 if validate_isbn13(clean_db_isbn) or validate_isbn10(clean_db_isbn):
                     is_isbn = True
                     search_query = clean_db_isbn
+                    detection_source = "DB"  # 감지출처: 데이터베이스
                 else:
                     # 파일 실시간 스캔 옵션이 켜져 있을 때만 EPUB/PDF의 무거운 헤더 디코딩을 진행함
                     if isbn_file_scan:
                         file_path = get_row_val(book, 'file_path')
-                        extracted_isbn = None
+                        extracted_isbn, method = None, None
                         if file_path and os.path.exists(file_path):
                             ext = os.path.splitext(file_path)[1].lower()
                             if ext == '.epub':
-                                extracted_isbn = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
+                                extracted_isbn, method = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
                             elif ext == '.pdf':
-                                extracted_isbn = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
+                                extracted_isbn, method = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
                                 
                         if extracted_isbn:
                             is_isbn = True
                             search_query = extracted_isbn
+                            detection_source = method  # 감지출처: LOCAL 또는 AI
 
         # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
@@ -193,8 +198,18 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             else:
                                 item['pubDate'] = formatted_date
                             
+                            # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
                             if is_isbn_mode:
-                                item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                                if detection_source == "INPUT":
+                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                                elif detection_source == "DB":
+                                    item['title'] = f"[{source_name}/DB] {original_title} *"
+                                elif detection_source == "LOCAL":
+                                    item['title'] = f"[{source_name}/LOCAL] {original_title} *"
+                                elif detection_source == "AI":
+                                    item['title'] = f"[{source_name}/AI] {original_title} *"
+                                else:
+                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
                             else:
                                 item['title'] = f"[{source_name}] {original_title}"
                             
@@ -260,6 +275,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
             pub_date_raw = item_data.get('pubDate', '')
+            # 끝부분에 붙은 매칭용 별표(*) 및 공백 제거
             clean_pub_date = pub_date_raw.split(" | ISBN:")[0].replace(" *", "").strip() if pub_date_raw else ''
 
             # ISBN 표준화 (특수 문자 및 하이픈 제거 후 대문자 X 정렬)
