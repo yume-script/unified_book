@@ -7,7 +7,7 @@ import html
 import json
 import urllib.request
 import urllib.parse
-import urllib.error  # 💡 HTTP 상세 에러 파싱을 위해 추가
+import urllib.error
 import xml.etree.ElementTree as ET
 
 # pypdf 라이브러리 탑재 여부 감지
@@ -102,11 +102,12 @@ def compare_isbns(isbn_a, isbn_b):
         
     return False
 
-def extract_isbn_via_gemini(text, api_key):
-    """💡 최신 구조화 JSON 모드가 적용된 구글 Gemini 3.5 Flash-Lite API 호출 엔진"""
-    if not api_key or not text.strip():
+def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
+    """구글 Gemini API 및 LiteLLM(OpenAI 호환) 프록시를 모두 지원하는 통합 지능형 판독 엔진"""
+    if not text.strip():
         return None
         
+    # gemini-3.5-flash-lite 모델을 활용해 속도 및 비용 최적화 (2026년 7월 21일 출시 모델)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
     
     # 잡담을 배제하고 오직 규정된 스키마의 JSON 오브젝트만 반환하도록 기계적 설계
@@ -117,49 +118,86 @@ def extract_isbn_via_gemini(text, api_key):
         f"[텍스트 본문]\n{text}"
     )
     
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json", # 💡 구글 공식 JSON 모드 활성화로 수다스러운 답변 완전 차단
+    # 1. LiteLLM / OpenAI 호환 모드 연동
+    if endpoint and endpoint.strip():
+        url = endpoint.strip()
+        target_model = model.strip() if model and model.strip() else "gemini/gemini-3.5-flash-lite"
+        
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
             "temperature": 0.1,
-            "maxOutputTokens": 100
+            "response_format": {"type": "json_object"}  # OpenAI JSON 모드 명시
         }
-    }
-    
-    try:
-        req = urllib.request.Request(
-            url, 
-            data=json.dumps(payload).encode('utf-8'),
-            headers={'Content-Type': 'application/json'}
-        )
-        with urllib.request.urlopen(req, timeout=12) as response:
-            res_data = json.loads(response.read().decode('utf-8'))
-            candidates = res_data.get('candidates', [])
-            if candidates:
-                parts = candidates[0].get('content', {}).get('parts', [])
-                if parts:
-                    # JSON 구조 파싱 및 값 검증
-                    raw_text = parts[0].get('text', '').strip()
-                    res_json = json.loads(raw_text)
+        
+        headers = {'Content-Type': 'application/json'}
+        if api_key and api_key.strip():
+            headers['Authorization'] = f"Bearer {api_key.strip()}"
+            
+        try:
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as response:
+                res_data = json.loads(response.read().decode('utf-8'))
+                choices = res_data.get('choices', [])
+                if choices:
+                    raw_content = choices[0].get('message', {}).get('content', '').strip()
+                    res_json = json.loads(raw_content)
                     raw_isbn = res_json.get('isbn', '')
                     clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
-                    
                     if validate_isbn13(clean) or validate_isbn10(clean):
                         return clean
-                        
-    except urllib.error.HTTPError as he:
-        # 💡 트러블슈팅 강화: 구글 서버 에러 메시지를 가리지 않고 터미널에 명확히 출력
-        error_msg = he.read().decode('utf-8', errors='ignore')
-        print(f"[Gemini API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
-    except Exception as e:
-        print(f"[Gemini API 일반 에러] 사유: {str(e)}", file=sys.stderr)
+        except urllib.error.HTTPError as he:
+            error_msg = he.read().decode('utf-8', errors='ignore')
+            print(f"[LiteLLM API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
+        except Exception as e:
+            print(f"[LiteLLM API 에러] 사유: {str(e)}", file=sys.stderr)
+
+    # 2. 순수 Google Gemini 공식 API 모드 연동
+    else:
+        if not api_key:
+            return None
+            
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": 0.1,
+                "maxOutputTokens": 100
+            }
+        }
         
+        try:
+            req = urllib.request.Request(
+                url, 
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=12) as response:
+                res_data = json.loads(response.read().decode('utf-8'))
+                candidates = res_data.get('candidates', [])
+                if candidates:
+                    parts = candidates[0].get('content', {}).get('parts', [])
+                    if parts:
+                        raw_text = parts[0].get('text', '').strip()
+                        res_json = json.loads(raw_text)
+                        raw_isbn = res_json.get('isbn', '')
+                        clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
+                        if validate_isbn13(clean) or validate_isbn10(clean):
+                            return clean
+        except urllib.error.HTTPError as he:
+            error_msg = he.read().decode('utf-8', errors='ignore')
+            print(f"[Gemini API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
+        except Exception as e:
+            print(f"[Gemini API 에러] 사유: {str(e)}", file=sys.stderr)
+            
     return None
 
-def extract_isbn_from_epub(epub_path, gemini_key=None):
-    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (제미나이 자동 Fallback 탑재)"""
+def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_model=None):
+    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (지능형 LLM 듀얼 분기 가동)"""
     try:
         with zipfile.ZipFile(epub_path, 'r') as epub:
             container_content = epub.read('META-INF/container.xml')
@@ -238,19 +276,19 @@ def extract_isbn_from_epub(epub_path, gemini_key=None):
             if isbn10_candidates:
                 return isbn10_candidates[0]
                 
-            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 제미나이 전송 판독
-            if gemini_key and compiled_texts:
-                full_text = "\n".join(compiled_texts)[:12000] # API 타임아웃 방지 및 최적화를 위해 버퍼 소폭 조정
-                gemini_isbn = extract_isbn_via_gemini(full_text, gemini_key)
-                if gemini_isbn:
-                    return gemini_isbn
+            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 LLM 전송 판독
+            if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
+                full_text = "\n".join(compiled_texts)[:12000]
+                llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
+                if llm_isbn:
+                    return llm_isbn
                     
     except Exception:
         pass
     return None
 
-def extract_isbn_from_pdf(pdf_path, gemini_key=None):
-    """PDF 메타데이터 및 전후면 판권 페이지 고속 타겟 스캔 (제미나이 자동 Fallback 탑재)"""
+def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_model=None):
+    """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (지능형 LLM 듀얼 분기 가동)"""
     if not PYPDF_AVAILABLE:
         return None
         
@@ -291,12 +329,12 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None):
             if isbn10_candidates:
                 return isbn10_candidates[0]
                 
-            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 제미나이 전송 판독
-            if gemini_key and compiled_texts:
+            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 LLM 전송 판독
+            if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
                 full_text = "\n".join(compiled_texts)[:12000]
-                gemini_isbn = extract_isbn_via_gemini(full_text, gemini_key)
-                if gemini_isbn:
-                    return gemini_isbn
+                llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
+                if llm_isbn:
+                    return llm_isbn
                     
     except Exception:
         pass
