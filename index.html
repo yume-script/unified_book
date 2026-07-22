@@ -37,12 +37,30 @@
     </div>
   </div>
 
-  <!-- 제미나이 API 설정 💡 추가됨 -->
+  <!-- 제미나이 / LiteLLM 공통 Key 설정 -->
   <div class="ubs-plugin-field">
-    <label for="ubs-gemini-key">Gemini API Key</label>
+    <label for="ubs-gemini-key">LLM API Key</label>
     <div class="ubs-input-container">
-      <input id="ubs-gemini-key" type="password" name="GEMINI_API_KEY" placeholder="AI Studio에서 발급받은 API Key를 입력하세요 (선택)" />
-      <p class="hint">로컬 분석 실패 시 제미나이 AI를 활용해 책 본문에서 ISBN을 역추적합니다. (Google AI Studio에서 무료 발급 가능)</p>
+      <input id="ubs-gemini-key" type="password" name="GEMINI_API_KEY" placeholder="Gemini 혹은 LiteLLM API Key를 입력하세요 (선택)" />
+      <p class="hint">구글 Gemini나 본인의 LiteLLM 게이트웨이에 사용될 베어러(Bearer) 토큰 키를 입력합니다.</p>
+    </div>
+  </div>
+
+  <!-- LiteLLM 전용 엔드포인트 설정 -->
+  <div class="ubs-plugin-field">
+    <label for="ubs-litellm-endpoint">LiteLLM API 주소</label>
+    <div class="ubs-input-container">
+      <input id="ubs-litellm-endpoint" type="text" name="LITELLM_ENDPOINT" placeholder="예: http://localhost:4000/v1/chat/completions (선택)" />
+      <p class="hint">LiteLLM 또는 OpenAI 호환 프록시 서버의 완전한 Completions 엔드포인트 주소를 입력하세요. (비워둘 시 구글 공식 순수 제미나이 작동)</p>
+    </div>
+  </div>
+
+  <!-- LiteLLM 전용 모델명 설정 -->
+  <div class="ubs-plugin-field">
+    <label for="ubs-litellm-model">LiteLLM 모델명</label>
+    <div class="ubs-input-container">
+      <input id="ubs-litellm-model" type="text" name="LITELLM_MODEL" placeholder="예: gemini/gemini-3.5-flash-lite (선택)" />
+      <p class="hint">LiteLLM 라우터에 요청을 보낼 때 적용할 모델 별칭을 적어줍니다. (비워둘 시 기본값: gemini/gemini-3.5-flash-lite)</p>
     </div>
   </div>
 
