@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 import os
 import re
+import sys
 import zipfile
 import html
 import json
 import urllib.request
 import urllib.parse
+import urllib.error  # 💡 HTTP 상세 에러 파싱을 위해 추가
 import xml.etree.ElementTree as ET
 
 # pypdf 라이브러리 탑재 여부 감지
@@ -101,16 +103,17 @@ def compare_isbns(isbn_a, isbn_b):
     return False
 
 def extract_isbn_via_gemini(text, api_key):
-    """💡 구글 Gemini API를 활용한 도서 텍스트 내 ISBN 비동기 정밀 추출"""
+    """💡 최신 구조화 JSON 모드가 적용된 구글 Gemini 3.5 Flash-Lite API 호출 엔진"""
     if not api_key or not text.strip():
         return None
         
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
     
+    # 잡담을 배제하고 오직 규정된 스키마의 JSON 오브젝트만 반환하도록 기계적 설계
     prompt = (
         "다음 도서 판권지/본문 텍스트에서 ISBN 번호만 추출해줘.\n"
-        "출력값에는 공백, 하이픈, 한글, 영어 등을 모두 배제하고 오직 10자리 또는 13자리의 숫자(마지막 X 허용)로만 구성된 단 하나의 ISBN 값만 반환해줘.\n"
-        "만약 본문에 유효한 ISBN 번호가 존재하지 않는다면 아무 글자도 적지 말고 빈 문자열만 반환해줘.\n\n"
+        "출력은 반드시 다른 미사여구 없이 JSON 형식으로만 해야 하며, 그 구조는 반드시 다음 스키마를 따라야 해:\n"
+        "{\"isbn\": \"공백이나 하이픈을 제거한 오직 10자리 또는 13자리 숫자(마지막 X 허용) 문자열 (발견되지 않으면 빈 문자열)\"}\n\n"
         f"[텍스트 본문]\n{text}"
     )
     
@@ -119,8 +122,9 @@ def extract_isbn_via_gemini(text, api_key):
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "temperature": 0.1,  # 일관성 높은 정밀 추출을 위해 온도를 극도로 낮춤
-            "maxOutputTokens": 20
+            "responseMimeType": "application/json", # 💡 구글 공식 JSON 모드 활성화로 수다스러운 답변 완전 차단
+            "temperature": 0.1,
+            "maxOutputTokens": 100
         }
     }
     
@@ -130,18 +134,28 @@ def extract_isbn_via_gemini(text, api_key):
             data=json.dumps(payload).encode('utf-8'),
             headers={'Content-Type': 'application/json'}
         )
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=12) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             candidates = res_data.get('candidates', [])
             if candidates:
                 parts = candidates[0].get('content', {}).get('parts', [])
                 if parts:
-                    raw_isbn = parts[0].get('text', '').strip()
-                    clean = re.sub(r'[^0-9X]', '', raw_isbn.upper())
-                    if len(clean) in (10, 13):
+                    # JSON 구조 파싱 및 값 검증
+                    raw_text = parts[0].get('text', '').strip()
+                    res_json = json.loads(raw_text)
+                    raw_isbn = res_json.get('isbn', '')
+                    clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
+                    
+                    if validate_isbn13(clean) or validate_isbn10(clean):
                         return clean
-    except Exception:
-        pass
+                        
+    except urllib.error.HTTPError as he:
+        # 💡 트러블슈팅 강화: 구글 서버 에러 메시지를 가리지 않고 터미널에 명확히 출력
+        error_msg = he.read().decode('utf-8', errors='ignore')
+        print(f"[Gemini API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
+    except Exception as e:
+        print(f"[Gemini API 일반 에러] 사유: {str(e)}", file=sys.stderr)
+        
     return None
 
 def extract_isbn_from_epub(epub_path, gemini_key=None):
@@ -224,9 +238,9 @@ def extract_isbn_from_epub(epub_path, gemini_key=None):
             if isbn10_candidates:
                 return isbn10_candidates[0]
                 
-            # 💡 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 제미나이 전송 판독
+            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 제미나이 전송 판독
             if gemini_key and compiled_texts:
-                full_text = "\n".join(compiled_texts)[:18000] # 토큰 절약 및 타임아웃 방지 임계값 설정
+                full_text = "\n".join(compiled_texts)[:12000] # API 타임아웃 방지 및 최적화를 위해 버퍼 소폭 조정
                 gemini_isbn = extract_isbn_via_gemini(full_text, gemini_key)
                 if gemini_isbn:
                     return gemini_isbn
@@ -277,9 +291,9 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None):
             if isbn10_candidates:
                 return isbn10_candidates[0]
                 
-            # 💡 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 제미나이 전송 판독
+            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 제미나이 전송 판독
             if gemini_key and compiled_texts:
-                full_text = "\n".join(compiled_texts)[:18000]
+                full_text = "\n".join(compiled_texts)[:12000]
                 gemini_isbn = extract_isbn_via_gemini(full_text, gemini_key)
                 if gemini_isbn:
                     return gemini_isbn
