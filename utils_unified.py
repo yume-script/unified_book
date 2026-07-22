@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import re
+import sys
 import zipfile
 import html
 import json
@@ -243,7 +244,7 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
             
             opf_dir = os.path.dirname(opf_path)
             
-            # 💡 [초고속 조기 종료 필터 1]: 만화책/스캔본 전용 EPUB 판별
+            # [초고속 조기 종료 필터 1]: 만화책/스캔본 전용 EPUB 판별
             # 앞쪽 3장의 텍스트 정보가 공백 제외 20자 미만인 경우 이미지 중심의 도서로 간주하고 즉시 조기 종료
             sample_epub_text = ""
             check_spines = target_spines[:3]
@@ -319,14 +320,18 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
             if num_pages == 0:
                 return None, None
                 
-            # 💡 [초고속 조기 종료 필터 2]: 스캔본(통 이미지) 전용 PDF 판별
-            # 표지를 제외한 본문 초입부(1, 2, 3페이지)에서 임시 텍스트 추출을 먼저 수행해 봅니다.
-            # 이 구역마저 텍스트 데이터가 없다면 OCR이 필요한 스캔본으로 즉시 인지하여 파일 조회를 0.002초 만에 즉각 취소합니다.
-            sample_text = ""
-            check_indices = [idx for idx in [1, 2, 3] if idx < num_pages]
+            # 💡 [초고속 조기 종료 필터 2]: 스캔본(통 이미지) 전용 PDF 판별 전방 5p, 후방 5p 확장 감지
+            # 표지를 제외한 본문 초입부(1~5페이지)와 맨 뒷부분(끝에서 5페이지)에서 임시 텍스트 추출을 먼저 시도합니다.
+            # 전/후방 양쪽 구역 모두 글자 데이터가 아예 없는 경우에만 스캔본(통 이미지)으로 판정하고 즉시 스캔을 중단합니다.
+            check_indices = list(range(1, min(6, num_pages)))
+            if num_pages > 5:
+                check_indices.extend(list(range(max(5, num_pages - 5), num_pages)))
+                
+            check_indices = sorted(list(set(check_indices)))
             if not check_indices:
                 check_indices = [0]
                 
+            sample_text = ""
             for idx in check_indices:
                 try:
                     p_text = reader.pages[idx].extract_text()
@@ -335,7 +340,7 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 except Exception:
                     pass
             if not sample_text.strip():
-                return None, None # 글자가 전혀 긁히지 않는 스캔 도서이므로 실시간 수색 종료
+                return None, None # 전후방 모두 글자가 전혀 긁히지 않는 스캔 도서이므로 실시간 수색 조기 종료
                 
             pages_to_scan = list(range(min(30, num_pages)))
             if num_pages > 30:
@@ -359,7 +364,7 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
-                    if validate_isbn13(clean) or validate_isbn10(clean):
+                    if validate_isbn13(clean):
                         return clean, "LOCAL"
                     elif validate_isbn10(clean):
                         isbn10_candidates.append(clean)
