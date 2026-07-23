@@ -33,3 +33,4 @@ def search_naver_isbn(isbn, cid, csecret):
                      'isbn': i.get('isbn', '').split()[-1] if i.get('isbn') else ''} 
                     for i in data.get('items', [])]
     except: return []
+
