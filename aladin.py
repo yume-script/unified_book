@@ -1,36 +1,84 @@
 # -*- coding: utf-8 -*-
+import json
 import urllib.request
 import urllib.parse
-import json
 
 def search_aladin(query, ttbkey):
-    """알라딘 일반 도서 검색 API"""
+    if not ttbkey:
+        return []
     url = "http://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
-    params = {'ttbkey': ttbkey, 'Query': query, 'QueryType': 'Title', 'MaxResults': 10, 'output': 'js', 'Version': '20131101'}
+    params = {
+        'ttbkey': ttbkey,
+        'Query': query,
+        'QueryType': 'Keyword',
+        'MaxResults': 10,
+        'start': 1,
+        'SearchTarget': 'Book',
+        'output': 'js',
+        'Version': '20131101'
+    }
     try:
-        with urllib.request.urlopen(f"{url}?{urllib.parse.urlencode(params)}", timeout=7) as response:
-            res = response.read().decode('utf-8')
-            if res.endswith(';'): res = res[:-1]
-            data = json.loads(res)
-            return [{'title': i.get('title'), 'author': i.get('author'), 'publisher': i.get('publisher'),
-                     'pubDate': i.get('pubDate'), 'cover': i.get('cover'), 
-                     'description': i.get('description', ''), 'link': i.get('link'), 'source': '알라딘',
-                     'isbn': i.get('isbn13') or i.get('isbn', '')} 
-                    for i in data.get('item', [])]
-    except: return []
+        full_url = f"{url}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(full_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_body = response.read().decode('utf-8')
+            if res_body.endswith(';'):
+                res_body = res_body[:-1]
+            data = json.loads(res_body)
+            items = data.get('item', [])
+            results = []
+            for item in items:
+                results.append({
+                    'title': item.get('title'),
+                    'author': item.get('author'),
+                    'isbn': item.get('isbn13') or item.get('isbn', ''),
+                    'publisher': item.get('publisher'),
+                    'pubDate': item.get('pubDate'),
+                    'cover': item.get('cover'),
+                    'description': item.get('description', ''),
+                    'link': item.get('link')
+                })
+            return results
+    except Exception as e:
+        print(f"[Aladin Error] {e}")
+        return []
 
 def search_aladin_isbn(isbn, ttbkey):
-    """알라딘 ISBN 일치 전용 검색 API"""
+    if not ttbkey or not isbn:
+        return []
     url = "http://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
-    params = {'ttbkey': ttbkey, 'Query': isbn, 'QueryType': 'ISBN', 'MaxResults': 1, 'output': 'js', 'Version': '20131101'}
+    params = {
+        'ttbkey': ttbkey,
+        'Query': isbn,
+        'QueryType': 'ISBN',
+        'MaxResults': 5,
+        'start': 1,
+        'SearchTarget': 'Book',
+        'output': 'js',
+        'Version': '20131101'
+    }
     try:
-        with urllib.request.urlopen(f"{url}?{urllib.parse.urlencode(params)}", timeout=7) as response:
-            res = response.read().decode('utf-8')
-            if res.endswith(';'): res = res[:-1]
-            data = json.loads(res)
-            return [{'title': i.get('title'), 'author': i.get('author'), 'publisher': i.get('publisher'),
-                     'pubDate': i.get('pubDate'), 'cover': i.get('cover'), 
-                     'description': i.get('description', ''), 'link': i.get('link'), 'source': '알라딘',
-                     'isbn': i.get('isbn13') or i.get('isbn', '')} 
-                    for i in data.get('item', [])]
-    except: return []
+        full_url = f"{url}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(full_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_body = response.read().decode('utf-8')
+            if res_body.endswith(';'):
+                res_body = res_body[:-1]
+            data = json.loads(res_body)
+            items = data.get('item', [])
+            results = []
+            for item in items:
+                results.append({
+                    'title': item.get('title'),
+                    'author': item.get('author'),
+                    'isbn': item.get('isbn13') or item.get('isbn', ''),
+                    'publisher': item.get('publisher'),
+                    'pubDate': item.get('pubDate'),
+                    'cover': item.get('cover'),
+                    'description': item.get('description', ''),
+                    'link': item.get('link')
+                })
+            return results
+    except Exception as e:
+        print(f"[Aladin ISBN Error] {e}")
+        return []
