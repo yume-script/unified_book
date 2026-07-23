@@ -34,3 +34,4 @@ def search_aladin_isbn(isbn, ttbkey):
                      'isbn': i.get('isbn13') or i.get('isbn', '')} 
                     for i in data.get('item', [])]
     except: return []
+
