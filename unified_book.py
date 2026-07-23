@@ -73,16 +73,72 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "version_key": "plugin version",
         "show_sample_update_button": True,
     }
+    
+    # 💡 각 항목별 가이드 설명을 담은 description 필드가 추가된 설정 스키마
     config_schema = [
-        {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
-        {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
-        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
-        {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
-        {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
-        {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
-        {"key": "LITELLM_MODEL", "label": "LiteLLM 모델명 (선택)", "type": "text", "required": False},
-        {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
-        {"key": "ISBN_FILE_SCAN", "label": "도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도", "type": "checkbox", "required": False}
+        {
+            "key": "ALADIN_KEY", 
+            "label": "알라딘 TTBKey", 
+            "type": "text", 
+            "required": False,
+            "description": "알라딘 Open API 서비스에서 발급받은 개인 TTBKey를 입력하세요."
+        },
+        {
+            "key": "NAVER_ID", 
+            "label": "네이버 Client ID", 
+            "type": "text", 
+            "required": False,
+            "description": "네이버 개발자 센터에서 애플리케이션 등록 후 발급받은 Client ID를 입력하세요."
+        },
+        {
+            "key": "NAVER_SECRET", 
+            "label": "네이버 Client Secret", 
+            "type": "text", 
+            "required": False,
+            "description": "네이버 개발자 센터에서 발급받은 Client Secret 보안키를 입력하세요."
+        },
+        {
+            "key": "GOOGLE_API_KEY", 
+            "label": "Google API Key", 
+            "type": "text", 
+            "required": False,
+            "description": "Google Cloud Console에서 활성화한 Books API Key를 입력하세요 (선택 사항)."
+        },
+        {
+            "key": "GEMINI_API_KEY", 
+            "label": "Gemini/LiteLLM API Key", 
+            "type": "text", 
+            "required": False,
+            "description": "구글 AI Studio API Key 또는 자체 LiteLLM 프록시 서버의 마스터 인증 키를 입력하세요."
+        },
+        {
+            "key": "LITELLM_ENDPOINT", 
+            "label": "LiteLLM API 주소 (선택)", 
+            "type": "text", 
+            "required": False,
+            "description": "LiteLLM 게이트웨이의 완전한 Completions 엔드포인트 주소 (예: http://localhost:4000/v1/chat/completions)"
+        },
+        {
+            "key": "LITELLM_MODEL", 
+            "label": "LiteLLM 모델명 (선택)", 
+            "type": "text", 
+            "required": False,
+            "description": "LiteLLM 라우터에 호출할 모델 별칭 (비워둘 시 기본값: gemini/gemini-3.5-flash-lite)"
+        },
+        {
+            "key": "STRICT_MATCH", 
+            "label": "검색 결과 엄격한 필터링", 
+            "type": "checkbox", 
+            "required": False,
+            "description": "체크 시, 검색어와 제목이 일치하는 도서 결과만 엄격하게 대조하여 필터링합니다."
+        },
+        {
+            "key": "ISBN_FILE_SCAN", 
+            "label": "도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도", 
+            "type": "checkbox", 
+            "required": False,
+            "description": "체크 시, 수동 검색 시 실제 도서 파일을 열어 판권지 속 ISBN을 추적합니다 (저사양 서버는 해제 권장)."
+        }
     ]
 
     def search(self, db_type, query):
@@ -108,9 +164,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         clean_query = re.sub(r'[^0-9X]', '', query.upper())
         is_isbn = validate_isbn13(clean_query) or validate_isbn10(clean_query)
         search_query = clean_query if is_isbn else query
-        
-        # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
-        detection_source = "INPUT" if is_isbn else None
 
         # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
@@ -135,23 +188,21 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 if validate_isbn13(clean_db_isbn) or validate_isbn10(clean_db_isbn):
                     is_isbn = True
                     search_query = clean_db_isbn
-                    detection_source = "DB"  # 감지출처: 데이터베이스
                 else:
                     # 파일 실시간 스캔 옵션이 켜져 있을 때만 EPUB/PDF의 무거운 헤더 디코딩을 진행함
                     if isbn_file_scan:
                         file_path = get_row_val(book, 'file_path')
-                        extracted_isbn, method = None, None
+                        extracted_isbn = None
                         if file_path and os.path.exists(file_path):
                             ext = os.path.splitext(file_path)[1].lower()
                             if ext == '.epub':
-                                extracted_isbn, method = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
+                                extracted_isbn = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
                             elif ext == '.pdf':
-                                extracted_isbn, method = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
+                                extracted_isbn = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
                                 
                         if extracted_isbn:
                             is_isbn = True
                             search_query = extracted_isbn
-                            detection_source = method  # 감지출처: LOCAL 또는 AI
 
         # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
@@ -198,18 +249,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             else:
                                 item['pubDate'] = formatted_date
                             
-                            # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
                             if is_isbn_mode:
-                                if detection_source == "INPUT":
-                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
-                                elif detection_source == "DB":
-                                    item['title'] = f"[{source_name}/DB] {original_title} *"
-                                elif detection_source == "LOCAL":
-                                    item['title'] = f"[{source_name}/LOCAL] {original_title} *"
-                                elif detection_source == "AI":
-                                    item['title'] = f"[{source_name}/AI] {original_title} *"
-                                else:
-                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                                item['title'] = f"[{source_name}/ISBN] {original_title} *"
                             else:
                                 item['title'] = f"[{source_name}] {original_title}"
                             
@@ -275,7 +316,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
             pub_date_raw = item_data.get('pubDate', '')
-            # 끝부분에 붙은 매칭용 별표(*) 및 공백 제거
             clean_pub_date = pub_date_raw.split(" | ISBN:")[0].replace(" *", "").strip() if pub_date_raw else ''
 
             # ISBN 표준화 (특수 문자 및 하이픈 제거 후 대문자 X 정렬)
