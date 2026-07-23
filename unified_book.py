@@ -88,49 +88,50 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     def search(self, db_type, query):
         if not query:
             return []
-
+            
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
         gemini_key = config.get("GEMINI_API_KEY", "").strip()
         llm_endpoint = config.get("LITELLM_ENDPOINT", "").strip()
         llm_model = config.get("LITELLM_MODEL", "").strip()
-
+        
         # 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
         clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
         clean_query_base = re.sub(r'\[.*?\]|\(.*?\)', '', clean_query_base).strip()
         if not clean_query_base:
             clean_query_base = query
-        norm_query = "".join(re.findall(r'\w+', clean_query_base.replace('_', ''))).lower()
 
+        norm_query = "".join(re.findall(r'\w+', clean_query_base.replace('_', ''))).lower()
+        
         # 입력받은 기본 검색어가 이미 유효한 ISBN 구성인지 우선 감지
         clean_query = re.sub(r'[^0-9X]', '', query.upper())
         is_isbn = validate_isbn13(clean_query) or validate_isbn10(clean_query)
         search_query = clean_query if is_isbn else query
-
+        
         # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
         detection_source = "INPUT" if is_isbn else None
 
         # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
-
+            
             # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
             book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
             if not book:
                 book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
-
+                
             # 유연한 부분일치 검색 추가 가동
             if not book:
                 words = [w for w in clean_query_base.split() if len(w) > 1]
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
                     book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
-
+                
             if book:
                 db_isbn = get_row_val(book, 'isbn')
                 clean_db_isbn = re.sub(r'[^0-9X]', '', str(db_isbn).upper()) if db_isbn else ''
-
+                
                 if validate_isbn13(clean_db_isbn) or validate_isbn10(clean_db_isbn):
                     is_isbn = True
                     search_query = clean_db_isbn
@@ -146,16 +147,17 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                                 extracted_isbn, method = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
                             elif ext == '.pdf':
                                 extracted_isbn, method = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
-
+                                
                         if extracted_isbn:
                             is_isbn = True
                             search_query = extracted_isbn
                             detection_source = method  # 감지출처: LOCAL 또는 AI
+
         # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
             res = []
             titles_seen = set()
-
+            
             # 워커 스레드를 할당하여 API를 동시 다발적으로 호출
             futures = {}
             with ThreadPoolExecutor(max_workers=len(sources)) as executor:
@@ -165,7 +167,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     # 비동기 백그라운드 쿼리 등록
                     future = executor.submit(func, s_query, *args)
                     futures[future] = source_name
-
+                
                 # 먼저 완성되는 결과부터 실시간 데이터 정합성 검증 적용
                 for future in as_completed(futures):
                     source_name = futures[future]
@@ -173,13 +175,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         items = future.result()
                     except Exception:
                         continue
-
+                    
                     for item in items:
                         if is_isbn_mode:
                             item_isbn = item.get('isbn', '')
                             if not compare_isbns(s_query, item_isbn):
                                 continue
-
+                        
                         original_title = item.get('title', '')
                         if not is_isbn_mode and strict_match and norm_query:
                             if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
@@ -188,14 +190,14 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         norm = "".join(re.findall(r'\w+', original_title)).lower()
                         if norm and norm not in titles_seen:
                             item['cover'] = get_high_res_url(item.get('cover'), source_name)
-
+                            
                             formatted_date = format_date(item.get('pubDate'))
                             isbn = item.get('isbn', '')
                             if isbn:
                                 item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
                             else:
                                 item['pubDate'] = formatted_date
-
+                            
                             # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
                             if is_isbn_mode:
                                 if detection_source == "INPUT":
@@ -210,7 +212,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                                     item['title'] = f"[{source_name}/ISBN] {original_title} *"
                             else:
                                 item['title'] = f"[{source_name}] {original_title}"
-
+                            
                             item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
 
                             res.append(item)
@@ -242,8 +244,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
     def apply(self, db_type, book_id, item_data):
         if Image is None:
-          return False, "Pillow 라이브러리가 필요합니다."
-
+            return False, "Pillow 라이브러리가 필요합니다."
+            
         gateway = self.get_db_gateway(db_type)
         try:
             book = gateway.fetch_one("SELECT file_path, library_id FROM books WHERE id = ?", (book_id,))
@@ -263,7 +265,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     book_hash = hashlib.md5(os.path.basename(file_path).encode('utf-8')).hexdigest()
                     cover_filename = f"book_{book_hash}.webp"
                     dest_path = os.path.join(covers_dir, cover_filename)
-
+                    
                     req = urllib.request.Request(cover_url, headers={'User-Agent': 'Mozilla/5.0'})
                     with urllib.request.urlopen(req, timeout=15) as response:
                         with Image.open(io.BytesIO(response.read())) as img:
@@ -331,3 +333,4 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 'open_url': url
             }
         return {'success': False, 'error': '알 수 없는 액션입니다.'}
+
