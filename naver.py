@@ -1,37 +1,35 @@
 # -*- coding: utf-8 -*-
-import json
 import urllib.request
 import urllib.parse
+import json
+import re
 
-def search_naver(query, client_id, client_secret):
-    if not client_id or not client_secret:
-        return []
-    url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(query)}&display=10"
-    req = urllib.request.Request(url, headers={
-        'X-Naver-Client-Id': client_id,
-        'X-Naver-Client-Secret': client_secret,
-        'User-Agent': 'Mozilla/5.0'
-    })
+def search_naver(query, cid, csecret):
+    """네이버 일반 도서 상세 검색 API"""
+    url = "https://openapi.naver.com/v1/search/book_adv.json"
+    req = urllib.request.Request(f"{url}?{urllib.parse.urlencode({'d_titl': query, 'display': 10})}")
+    req.add_header("X-Naver-Client-Id", cid); req.add_header("X-Naver-Client-Secret", csecret)
     try:
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=7) as response:
             data = json.loads(response.read().decode('utf-8'))
-            items = data.get('items', [])
-            results = []
-            for item in items:
-                results.append({
-                    'title': item.get('title'),
-                    'author': item.get('author'),
-                    'isbn': item.get('isbn', '').split(' ')[-1],  # 네이버는 종종 공백으로 isbn을 구분함
-                    'publisher': item.get('publisher'),
-                    'pubDate': item.get('pubdate'),
-                    'cover': item.get('image'),
-                    'description': item.get('description', ''),
-                    'link': item.get('link')
-                })
-            return results
-    except Exception as e:
-        print(f"[Naver Error] {e}")
-        return []
+            return [{'title': re.sub('<[^<]+?>', '', i.get('title', '')), 'author': i.get('author'),
+                     'publisher': i.get('publisher'), 'pubDate': i.get('pubdate'), 
+                     'cover': i.get('image'), 'description': i.get('description', ''), 'link': i.get('link'), 'source': '네이버',
+                     'isbn': i.get('isbn', '').split()[-1] if i.get('isbn') else ''} 
+                    for i in data.get('items', [])]
+    except: return []
 
-def search_naver_isbn(isbn, client_id, client_secret):
-    return search_naver(isbn, client_id, client_secret)
+def search_naver_isbn(isbn, cid, csecret):
+    """네이버 ISBN 상세 일치 검색 API"""
+    url = "https://openapi.naver.com/v1/search/book_adv.json"
+    req = urllib.request.Request(f"{url}?{urllib.parse.urlencode({'d_isbn': isbn, 'display': 1})}")
+    req.add_header("X-Naver-Client-Id", cid); req.add_header("X-Naver-Client-Secret", csecret)
+    try:
+        with urllib.request.urlopen(req, timeout=7) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            return [{'title': re.sub('<[^<]+?>', '', i.get('title', '')), 'author': i.get('author'),
+                     'publisher': i.get('publisher'), 'pubDate': i.get('pubdate'), 
+                     'cover': i.get('image'), 'description': i.get('description', ''), 'link': i.get('link'), 'source': '네이버',
+                     'isbn': i.get('isbn', '').split()[-1] if i.get('isbn') else ''} 
+                    for i in data.get('items', [])]
+    except: return []
