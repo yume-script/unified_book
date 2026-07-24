@@ -275,8 +275,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
             pub_date_raw = item_data.get('pubDate', '')
-            # 끝부분에 붙은 매칭용 별표(*) 및 공백 제거
             clean_pub_date = pub_date_raw.split(" | ISBN:")[0].replace(" *", "").strip() if pub_date_raw else ''
+
+            # 💡 [추가] UI용 접두사 및 별표(*)를 제거하여 순수 책 이름(title)만 추출
+            raw_title = item_data.get('title', '')
+            clean_title = re.sub(r'^\[.*?\]\s*', '', raw_title).replace(' *', '').strip()
+            if not clean_title:
+                clean_title = raw_title
 
             # ISBN 표준화 (특수 문자 및 하이픈 제거 후 대문자 X 정렬)
             raw_isbn = item_data.get('isbn', '')
@@ -293,20 +298,20 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             # CASE WHEN 조건문을 적용하여, 새로운 커버 이미지가 실제로 성공적으로 반영되었을 때만 cover_updated_at 갱신
             if has_isbn_column:
                 gateway.execute(
-                    """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
+                    """UPDATE books SET title = ?, author = ?, publisher = ?, summary = ?, link = ?, 
                        release_date = ?, isbn = COALESCE(NULLIF(?, ''), isbn), cover_image = COALESCE(NULLIF(?, ''), cover_image),
                        cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
                        WHERE id = ?""",
-                    (item_data.get('author'), item_data.get('publisher'), final_summary, 
+                    (clean_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
                      item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, cover_filename, cover_filename, book_id)
                 )
             else:
                 gateway.execute(
-                    """UPDATE books SET author = ?, publisher = ?, summary = ?, link = ?, 
+                    """UPDATE books SET title = ?, author = ?, publisher = ?, summary = ?, link = ?, 
                        release_date = ?, cover_image = COALESCE(NULLIF(?, ''), cover_image),
                        cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
                        WHERE id = ?""",
-                    (item_data.get('author'), item_data.get('publisher'), final_summary, 
+                    (clean_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
                      item_data.get('link'), clean_pub_date, cover_filename, cover_filename, cover_filename, book_id)
                 )
 
@@ -333,4 +338,3 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 'open_url': url
             }
         return {'success': False, 'error': '알 수 없는 액션입니다.'}
-
