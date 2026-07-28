@@ -71,7 +71,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     config_schema = [
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
         {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
-        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
+        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "password", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
         {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
         {"key": "LINK_ISBN_SCAN", "label": "저장된 링크(link)에서 ISBN 웹 파싱 시도", "type": "checkbox", "required": False},
@@ -307,8 +307,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             query = context.get('book_title')
             url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
             return {
-                'success': True, 
-                'message': '통합 검색 페이지를 엽니다.', 
+                'success': True,
+                'message': '통합 검색 페이지를 엽니다.',
                 'open_url': url
             }
         return {'success': False, 'error': '알 수 없는 액션입니다.'}

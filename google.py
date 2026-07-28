@@ -25,7 +25,7 @@ def extract_isbn(volume_info):
 
 
 def search_google(query, api_key):
-    """구글 도서 API 검색 (일반 및 ISBN 인덱스 병행 매칭)"""
+    """구글 도서 API 검색"""
     params = {'q': query, 'maxResults': 10, 'langRestrict': 'ko'}
     if api_key:
         params['key'] = api_key
