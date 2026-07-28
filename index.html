@@ -2,47 +2,22 @@
   <div class="ubs-plugin-title">통합 도서 검색 설정</div>
   <div class="ubs-plugin-desc">알라딘, 네이버, 구글의 도서 오픈 API 데이터를 동시에 조회하여 책 정보를 한층 더 풍성하게 채워 넣습니다.</div>
 
-  <!-- ============ 박스 1: AI 판독(ISBN 자동 추출) 설정 ============ -->
+  <!-- ============ 박스 1: ISBN 자동 감지 설정 ============ -->
   <div class="ubs-plugin-box">
     <div class="ubs-box-header">
-      <div class="ubs-box-title">🤖 AI ISBN 판독 설정</div>
-      <div class="ubs-box-desc">도서 파일(EPUB/PDF)의 판권지에서 ISBN을 찾지 못했을 때, AI(Gemini 또는 LiteLLM)로 판독을 보조합니다.</div>
+      <div class="ubs-box-title">🔗 ISBN 자동 감지 설정</div>
+      <div class="ubs-box-desc">DB에 ISBN이 없는 도서는, 이전에 저장해둔 도서 상세페이지 링크(link)를 열어 페이지 내에서 ISBN을 찾아 정밀 검색에 활용합니다.</div>
     </div>
 
-    <!-- 체크박스: ISBN 파일 스캔(AI 판독 포함) 사용 여부 -->
     <div class="ubs-plugin-field">
       <div class="ubs-label-spacer"></div>
       <div class="ubs-input-container">
-        <label class="ubs-checkbox-label" for="ubs-isbn-file-scan">
-          <input id="ubs-isbn-file-scan" type="checkbox" name="ISBN_FILE_SCAN" value="true" checked />
-          <span>도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도</span>
+        <label class="ubs-checkbox-label" for="ubs-link-isbn-scan">
+          <input id="ubs-link-isbn-scan" type="checkbox" name="LINK_ISBN_SCAN" value="true" checked />
+          <span>저장된 링크(link)에서 ISBN 웹 파싱 시도</span>
         </label>
-        <p class="hint">체크 시: DB에 ISBN이 없는 도서는 파일 판권지를 열어 정규식으로 먼저 찾고, 실패하면 아래 AI 설정을 이용해 판독합니다.<br>
-        해제 시: 파일을 열지 않고 곧바로 제목 텍스트로만 검색합니다(더 빠름). 이 항목을 끄면 아래 AI 설정은 사용되지 않습니다.</p>
-      </div>
-    </div>
-
-    <div class="ubs-plugin-field">
-      <label for="ubs-gemini-key">LLM API Key</label>
-      <div class="ubs-input-container">
-        <input id="ubs-gemini-key" type="password" name="GEMINI_API_KEY" placeholder="Gemini 혹은 LiteLLM API Key를 입력하세요 (선택)" />
-        <p class="hint">구글 Gemini나 본인의 LiteLLM 게이트웨이에 사용될 베어러(Bearer) 토큰 키를 입력합니다.</p>
-      </div>
-    </div>
-
-    <div class="ubs-plugin-field">
-      <label for="ubs-litellm-endpoint">LiteLLM API 주소</label>
-      <div class="ubs-input-container">
-        <input id="ubs-litellm-endpoint" type="text" name="LITELLM_ENDPOINT" placeholder="예: http://localhost:4000/v1/chat/completions (선택)" />
-        <p class="hint">LiteLLM 또는 OpenAI 호환 프록시 서버의 완전한 Completions 엔드포인트 주소를 입력하세요. (비워둘 시 구글 공식 순수 제미나이 작동)</p>
-      </div>
-    </div>
-
-    <div class="ubs-plugin-field">
-      <label for="ubs-litellm-model">LiteLLM 모델명</label>
-      <div class="ubs-input-container">
-        <input id="ubs-litellm-model" type="text" name="LITELLM_MODEL" placeholder="예: gemini/gemini-3.5-flash-lite (선택)" />
-        <p class="hint">LiteLLM 라우터에 요청을 보낼 때 적용할 모델 별칭을 적어줍니다. (비워둘 시 기본값: gemini/gemini-3.5-flash-lite)</p>
+        <p class="hint">체크 시: 검색어와 일치하는 DB 도서를 찾아 ISBN을 우선 조회하고, ISBN이 없으면 저장된 링크(link) 페이지를 열어 ISBN을 찾은 뒤 정밀 검색을 시도합니다.<br>
+        해제 시: 링크를 열지 않고 곧바로 제목 텍스트로만 검색합니다 (더 빠르지만 정확도는 다소 낮을 수 있음). 링크가 신뢰할 수 없는 사이트를 가리킬 수 있는 환경에서는 해제를 권장합니다.</p>
       </div>
     </div>
   </div>

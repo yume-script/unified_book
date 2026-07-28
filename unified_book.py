@@ -30,7 +30,7 @@ try:
     from .google import search_google
     from .utils_unified import (
         format_date, get_high_res_url, validate_isbn13, validate_isbn10,
-        compare_isbns, get_row_val, parse_bool
+        compare_isbns, get_row_val, parse_bool, extract_isbn_from_link
     )
 except ImportError:
     _aladin_mod = _import_local_module("aladin")
@@ -51,6 +51,7 @@ except ImportError:
     compare_isbns = _utils_mod.compare_isbns
     get_row_val = _utils_mod.get_row_val
     parse_bool = _utils_mod.parse_bool
+    extract_isbn_from_link = _utils_mod.extract_isbn_from_link
 
 
 class UnifiedBookMetadataProvider(BaseMetadataProvider):
@@ -67,13 +68,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "version_key": "plugin version",
         "show_sample_update_button": True,
     }
-    # 다이어트: GEMINI_API_KEY / LITELLM_ENDPOINT / LITELLM_MODEL / ISBN_FILE_SCAN 항목 제거
     config_schema = [
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
         {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
         {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
         {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
+        {"key": "LINK_ISBN_SCAN", "label": "저장된 링크(link)에서 ISBN 웹 파싱 시도", "type": "checkbox", "required": False},
     ]
 
     def search(self, db_type, query):
@@ -82,6 +83,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
+        link_isbn_scan = parse_bool(config.get("LINK_ISBN_SCAN", True), default=True)
 
         # 검색어 정밀 전처리 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
         clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
@@ -99,19 +101,19 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
         detection_source = "INPUT" if is_isbn else None
 
-        # ISBN이 아닐 경우, DB에 이미 저장된 ISBN이 있는지만 확인 (파일 스캔/AI 판독 블록은 제거됨 - 다이어트)
+        # ISBN이 아닐 경우: DB의 isbn 컬럼 → (없으면) DB의 link 컬럼 웹 파싱 순으로 시도
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
 
-            book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
+            book = gateway.fetch_one("SELECT file_path, isbn, link FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
             if not book:
-                book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
+                book = gateway.fetch_one("SELECT file_path, isbn, link FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
 
             if not book:
                 words = [w for w in clean_query_base.split() if len(w) > 1]
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
-                    book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
+                    book = gateway.fetch_one("SELECT file_path, isbn, link FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
 
             if book:
                 db_isbn = get_row_val(book, 'isbn')
@@ -121,7 +123,15 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     is_isbn = True
                     search_query = clean_db_isbn
                     detection_source = "DB"  # 감지출처: 데이터베이스
-                # else: DB에도 유효한 ISBN이 없으면 파일을 열어보지 않고 그대로 제목 검색으로 폴백
+                elif link_isbn_scan:
+                    # DB에 ISBN이 없을 때만, 저장된 link(도서 상세페이지 URL)를 열어 웹 파싱으로 ISBN을 탐색
+                    book_link = get_row_val(book, 'link')
+                    if book_link:
+                        extracted_isbn = extract_isbn_from_link(book_link)
+                        if extracted_isbn:
+                            is_isbn = True
+                            search_query = extracted_isbn
+                            detection_source = "LINK"  # 감지출처: 저장된 링크 웹 파싱
 
         # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
@@ -165,12 +175,14 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             else:
                                 item['pubDate'] = formatted_date
 
-                            # ISBN 모드일 때는 감지 출처(INPUT/DB)를 라벨에 표기 (LOCAL/AI 분기는 다이어트로 제거됨)
+                            # ISBN 모드일 때는 감지 출처(INPUT/DB/LINK)를 라벨에 표기
                             if is_isbn_mode:
                                 if detection_source == "INPUT":
                                     item['title'] = f"[{source_name}/ISBN] {original_title} *"
                                 elif detection_source == "DB":
                                     item['title'] = f"[{source_name}/DB] {original_title} *"
+                                elif detection_source == "LINK":
+                                    item['title'] = f"[{source_name}/LINK] {original_title} *"
                                 else:
                                     item['title'] = f"[{source_name}/ISBN] {original_title} *"
                             else:
@@ -184,7 +196,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         results = []
 
-        # 1차 검색: ISBN이 확인된 경우(입력값 또는 DB) 정밀 ISBN 검색 시도
+        # 1차 검색: ISBN이 확인된 경우(입력값/DB/링크) 정밀 ISBN 검색 시도
         if is_isbn:
             sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
