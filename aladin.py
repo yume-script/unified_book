@@ -24,7 +24,7 @@ def _map_items(data):
     return [{'title': _strip_tags(i.get('title')), 'author': _strip_tags(i.get('author')),
              'publisher': _strip_tags(i.get('publisher')),
              'pubDate': i.get('pubDate'), 'cover': i.get('cover'),
-             'description': i.get('description', ''), 'link': i.get('link'), 'source': '알라딘',
+             'description': i.get('fullDescription') or i.get('description', ''), 'link': i.get('link'), 'source': '알라딘',
              'isbn': i.get('isbn13') or i.get('isbn', '')}
             for i in data.get('item', [])]
 
@@ -50,20 +50,24 @@ def search_aladin(query, ttbkey):
 
 
 def search_aladin_isbn(isbn, ttbkey):
-    """알라딘 ISBN 일치 전용 검색 API"""
-    url = "http://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
-    params = {'ttbkey': ttbkey, 'Query': isbn, 'QueryType': 'ISBN', 'MaxResults': 1, 'output': 'js', 'Version': '20131101'}
+    """알라딘 ISBN 단건조회 전용 API (ItemLookUp) - 검색이 아닌 조회이므로 오탐 없이 정확히 일치"""
+    url = "http://www.aladin.co.kr/ttb/api/ItemLookUp.aspx"
+    item_id_type = "ISBN13" if len(re.sub(r'[^0-9X]', '', isbn.upper())) == 13 else "ISBN"
+    params = {
+        'ttbkey': ttbkey, 'ItemId': isbn, 'ItemIdType': item_id_type,
+        'output': 'js', 'Version': '20131101', 'Cover': 'Big', 'OptResult': 'fulldescription'
+    }
     try:
         with urllib.request.urlopen(f"{url}?{urllib.parse.urlencode(params)}", timeout=7) as response:
             data = _parse_aladin_response(response.read().decode('utf-8'))
             return _map_items(data)
     except urllib.error.HTTPError as he:
         error_body = he.read().decode('utf-8', errors='ignore')
-        print(f"[알라딘 ISBN API HTTP 에러 {he.code}] isbn='{isbn}' 이유: {error_body}", file=sys.stderr)
+        print(f"[알라딘 ISBN 단건조회 HTTP 에러 {he.code}] isbn='{isbn}' 이유: {error_body}", file=sys.stderr)
     except urllib.error.URLError as ue:
-        print(f"[알라딘 ISBN API 연결 실패] isbn='{isbn}' 이유: {ue.reason}", file=sys.stderr)
+        print(f"[알라딘 ISBN 단건조회 연결 실패] isbn='{isbn}' 이유: {ue.reason}", file=sys.stderr)
     except json.JSONDecodeError as je:
-        print(f"[알라딘 ISBN API 응답 파싱 실패] isbn='{isbn}' 이유: {je}", file=sys.stderr)
+        print(f"[알라딘 ISBN 단건조회 응답 파싱 실패] isbn='{isbn}' 이유: {je}", file=sys.stderr)
     except Exception as e:
-        print(f"[알라딘 ISBN API 알 수 없는 에러] isbn='{isbn}' 사유: {str(e)}", file=sys.stderr)
+        print(f"[알라딘 ISBN 단건조회 알 수 없는 에러] isbn='{isbn}' 사유: {str(e)}", file=sys.stderr)
     return []

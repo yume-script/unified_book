@@ -246,6 +246,25 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             ]
             results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
 
+        # 최종 정렬: 1순위 ISBN 일치 > 2순위 제목 동일 > 3순위 소스 우선순위(알라딘 > 네이버 > 구글)
+        # 각 순위 안에서는 원래 순서(안정 정렬)가 유지됨
+        if results:
+            source_order = {'알라딘': 0, '네이버': 1, '구글': 2}
+
+            def _sort_priority(item):
+                isbn_priority = 0 if (is_isbn and compare_isbns(search_query, item.get('isbn', ''))) else 1
+
+                raw_title = item.get('title', '')
+                clean_title = re.sub(r'^\[.*?\]\s*', '', raw_title).replace(' *', '').strip()
+                norm_title = "".join(re.findall(r'\w+', clean_title)).lower()
+                title_priority = 0 if (norm_query and norm_query in norm_title) else 1
+
+                source_priority = source_order.get(item.get('source', ''), 3)
+
+                return (isbn_priority, title_priority, source_priority)
+
+            results.sort(key=_sort_priority)
+
         print(f"[통합 도서 검색] search() 종료 | 원본 검색어: '{query}' | 감지출처: {detection_source or 'NONE'} | 총 반환 {len(results)}건")
         return results
 
