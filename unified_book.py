@@ -81,6 +81,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         if not query:
             return []
 
+        print(f"[통합 도서 검색] search() 호출됨 | db_type: '{db_type}' | 원본 검색어: '{query}'")
+
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         link_isbn_scan = parse_bool(config.get("LINK_ISBN_SCAN", True), default=True)
@@ -100,6 +102,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
         detection_source = "INPUT" if is_isbn else None
+        if is_isbn:
+            print(f"[통합 도서 검색] 입력값 자체가 유효한 ISBN으로 감지됨: {clean_query}")
 
         # ISBN이 아닐 경우: DB의 isbn 컬럼 → (없으면) DB의 link 컬럼 웹 파싱 순으로 시도
         if not is_isbn:
@@ -133,26 +137,48 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             search_query = extracted_isbn
                             detection_source = "LINK"  # 감지출처: 저장된 링크 웹 파싱
                             print(f"[통합 도서 검색] LINK 파싱으로 ISBN 감지: '{clean_query_base}' -> {extracted_isbn} (출처: {book_link})")
+                        else:
+                            print(f"[통합 도서 검색] LINK 파싱 시도했으나 ISBN 미발견: '{clean_query_base}' (링크: {book_link}) -> 제목 검색으로 폴백")
+                    else:
+                        print(f"[통합 도서 검색] DB row는 찾았으나 isbn/link 모두 비어있음: '{clean_query_base}' -> 제목 검색으로 폴백")
+                else:
+                    print(f"[통합 도서 검색] DB row는 찾았으나 isbn 없음 + LINK_ISBN_SCAN 꺼짐: '{clean_query_base}' -> 제목 검색으로 폴백")
+            else:
+                print(f"[통합 도서 검색] DB에서 일치하는 book row를 찾지 못함: '{clean_query_base}' -> 제목 검색으로 폴백")
 
         # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
             res = []
             titles_seen = set()
 
+            mode_label = "ISBN 정밀검색" if is_isbn_mode else "제목검색"
+            print(f"[통합 도서 검색] {mode_label} 시작 | 검색어: '{s_query}'")
+
             futures = {}
-            with ThreadPoolExecutor(max_workers=len(sources)) as executor:
+            with ThreadPoolExecutor(max_workers=max(len(sources), 1)) as executor:
                 for source_name, func, args in sources:
-                    if source_name != '구글' and not all(args):
+                    # API 키(또는 필수 인증 정보)가 하나라도 비어있는 소스는 예외 없이 전부 바이패스
+                    if not all(args):
+                        print(f"[통합 도서 검색] {source_name} - API 키 미설정으로 건너뜀")
                         continue
                     future = executor.submit(func, s_query, *args)
                     futures[future] = source_name
+                    print(f"[통합 도서 검색] {source_name} - 검색 요청 전송")
+
+                if not futures:
+                    print(f"[통합 도서 검색] {mode_label} - 사용 가능한 소스가 없어 검색을 건너뜁니다 (모든 API 키 미설정)")
+                    return res
 
                 for future in as_completed(futures):
                     source_name = futures[future]
                     try:
                         items = future.result()
-                    except Exception:
+                    except Exception as e:
+                        print(f"[통합 도서 검색] {source_name} - 검색 중 예외 발생: {e}")
                         continue
+
+                    print(f"[통합 도서 검색] {source_name} - 원본 응답 {len(items)}건 수신")
+                    added_count = 0
 
                     for item in items:
                         if is_isbn_mode:
@@ -193,6 +219,11 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
                             res.append(item)
                             titles_seen.add(norm)
+                            added_count += 1
+
+                    print(f"[통합 도서 검색] {source_name} - 중복/필터 제외 후 {added_count}건 채택")
+
+            print(f"[통합 도서 검색] {mode_label} 종료 | 최종 결과 {len(res)}건")
             return res
 
         results = []
@@ -215,6 +246,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             ]
             results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
 
+        print(f"[통합 도서 검색] search() 종료 | 원본 검색어: '{query}' | 감지출처: {detection_source or 'NONE'} | 총 반환 {len(results)}건")
         return results
 
     def apply(self, db_type, book_id, item_data):
