@@ -132,6 +132,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             is_isbn = True
                             search_query = extracted_isbn
                             detection_source = "LINK"  # 감지출처: 저장된 링크 웹 파싱
+                            print(f"[통합 도서 검색] LINK 파싱으로 ISBN 감지: '{clean_query_base}' -> {extracted_isbn} (출처: {book_link})")
 
         # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
