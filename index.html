@@ -1,78 +1,75 @@
 <div class="ubs-plugin-panel">
   <div class="ubs-plugin-title">통합 도서 검색 설정</div>
-  <div class="ubs-plugin-desc">
-    국립중앙도서관, 알라딘, 네이버, 구글의 도서 오픈 API 데이터를 동시에 조회하고,
-    우선순위 규칙에 따라 하나의 서지정보로 합성합니다.
-    아래 항목은 실제 처리 순서(① 국립중앙도서관 → ② 알라딘 → ③ 네이버 → ④ 구글 → ⑤ 합성 옵션)를 따릅니다.
-  </div>
+  <div class="ubs-plugin-desc">알라딘, 네이버, 구글의 도서 오픈 API 데이터를 동시에 조회하여 책 정보를 한층 더 풍성하게 채워 넣습니다.</div>
 
-  <!-- ① 국립중앙도서관 서지정보(seoji) API 설정 -->
-  <div class="ubs-plugin-field">
-    <label for="ubs-nl-key">국립중앙도서관 인증키 (cert_key)</label>
-    <div class="ubs-input-container">
-      <input id="ubs-nl-key" type="text" name="NL_API_KEY" placeholder="국립중앙도서관에서 발급받은 인증키를 입력하세요 (선택)" />
-      <p class="hint">국립중앙도서관 Open API(ISBN 서지정보)에서 발급받은 인증키입니다. 서지정보(제목/저자/출판사) 합성 시 최우선으로 사용됩니다.</p>
+  <!-- ============ 박스 1: ISBN 자동 감지 설정 ============ -->
+  <div class="ubs-plugin-box">
+    <div class="ubs-box-header">
+      <div class="ubs-box-title">🔗 ISBN 자동 감지 설정</div>
+      <div class="ubs-box-desc">DB에 ISBN이 없는 도서는, 저장해둔 도서 상세페이지 링크(link)를 열어 페이지 내에서 ISBN을 찾아 정밀 검색에 활용합니다.</div>
+    </div>
+
+    <div class="ubs-plugin-field">
+      <div class="ubs-label-spacer"></div>
+      <div class="ubs-input-container">
+        <label class="ubs-checkbox-label" for="ubs-link-isbn-scan">
+          <input id="ubs-link-isbn-scan" type="checkbox" name="LINK_ISBN_SCAN" value="true" checked />
+          <span>저장된 링크(link)에서 ISBN 웹 파싱 시도</span>
+        </label>
+        <p class="hint">체크 시: 검색어와 일치하는 DB 도서를 찾아 ISBN을 우선 조회하고, ISBN이 없으면 저장된 링크(link) 페이지를 열어 ISBN을 찾은 뒤 정밀 검색을 시도합니다.<br>
+        해제 시: 링크를 열지 않고 곧바로 제목 텍스트로만 검색합니다 (더 빠르지만 정확도는 다소 낮을 수 있음).</p>
+      </div>
     </div>
   </div>
 
-  <!-- ② 알라딘 OpenAPI 설정 -->
-  <div class="ubs-plugin-field">
-    <label for="ubs-aladin-key">알라딘 OpenAPI TTBKey</label>
-    <div class="ubs-input-container">
-      <input id="ubs-aladin-key" type="text" name="ALADIN_KEY" placeholder="예: ttbabcdef123456" />
-      <p class="hint">알라딘 OpenAPI 페이지에서 발급받은 TTBKey를 정확히 입력하세요. 표지 이미지의 기본 우선 소스입니다.</p>
+  <!-- ============ 박스 2: 오픈 API 키 및 검색 옵션 ============ -->
+  <div class="ubs-plugin-box">
+    <div class="ubs-box-header">
+      <div class="ubs-box-title">🔑 서점 오픈 API 설정</div>
+      <div class="ubs-box-desc">알라딘, 네이버, 구글 도서 검색에 사용할 API 키를 입력하세요.</div>
     </div>
-  </div>
 
-  <!-- ③ 네이버 OpenAPI 설정 -->
-  <div class="ubs-plugin-field">
-    <label for="ubs-naver-id">네이버 Client ID</label>
-    <div class="ubs-input-container">
-      <input id="ubs-naver-id" type="text" name="NAVER_ID" placeholder="네이버 Client ID를 입력하세요" />
-      <p class="hint">네이버 개발자 센터에서 발급받은 애플리케이션 Client ID를 입력하세요.</p>
+    <div class="ubs-plugin-field">
+      <label for="ubs-aladin-key">알라딘 OpenAPI TTBKey</label>
+      <div class="ubs-input-container">
+        <input id="ubs-aladin-key" type="text" name="ALADIN_KEY" placeholder="예: ttbabcdef123456" />
+        <p class="hint">알라딘 OpenAPI 페이지에서 발급받은 TTBKey를 정확히 입력하세요.</p>
+      </div>
     </div>
-  </div>
 
-  <div class="ubs-plugin-field">
-    <label for="ubs-naver-secret">네이버 Client Secret</label>
-    <div class="ubs-input-container">
-      <input id="ubs-naver-secret" type="password" name="NAVER_SECRET" placeholder="네이버 Client Secret을 입력하세요" />
-      <p class="hint">네이버 개발자 센터에서 발급받은 Client Secret 키를 입력하세요.</p>
+    <div class="ubs-plugin-field">
+      <label for="ubs-naver-id">네이버 Client ID</label>
+      <div class="ubs-input-container">
+        <input id="ubs-naver-id" type="text" name="NAVER_ID" placeholder="네이버 Client ID를 입력하세요" />
+        <p class="hint">네이버 개발자 센터에서 발급받은 애플리케이션 Client ID를 입력하세요.</p>
+      </div>
     </div>
-  </div>
 
-  <!-- ④ 구글 Books API 설정 -->
-  <div class="ubs-plugin-field">
-    <label for="ubs-google-key">Google Books API Key</label>
-    <div class="ubs-input-container">
-      <input id="ubs-google-key" type="text" name="GOOGLE_API_KEY" placeholder="Google API Key를 입력하세요 (선택)" />
-      <p class="hint">구글 북스 API 키를 입력하세요. 비워두면 구글 검색은 자동으로 건너뜁니다(바이패스).</p>
+    <div class="ubs-plugin-field">
+      <label for="ubs-naver-secret">네이버 Client Secret</label>
+      <div class="ubs-input-container">
+        <input id="ubs-naver-secret" type="password" name="NAVER_SECRET" placeholder="네이버 Client Secret을 입력하세요" />
+        <p class="hint">네이버 개발자 센터에서 발급받은 Client Secret 키를 입력하세요.</p>
+      </div>
     </div>
-  </div>
 
-  <!-- ⑤ 메타데이터 합성 옵션 -->
-  <div class="ubs-plugin-field">
-    <label for="ubs-cover-priority">표지(Cover) 우선 소스</label>
-    <div class="ubs-input-container">
-      <select id="ubs-cover-priority" name="COVER_PRIORITY">
-        <option value="알라딘" selected>알라딘</option>
-        <option value="국립중앙도서관">국립중앙도서관</option>
-        <option value="네이버">네이버</option>
-        <option value="구글">구글</option>
-      </select>
-      <p class="hint">여러 소스에서 결과를 합성할 때, 선택한 소스에 표지 이미지가 있으면 무조건 그 표지를 우선 사용합니다. 서지정보(제목/저자/출판사)는 항상 국립중앙도서관 &gt; 알라딘 &gt; 네이버 &gt; 구글 순으로 병합됩니다.</p>
+    <div class="ubs-plugin-field">
+      <label for="ubs-google-key">Google Books API Key</label>
+      <div class="ubs-input-container">
+        <input id="ubs-google-key" type="text" name="GOOGLE_API_KEY" placeholder="Google API Key를 입력하세요 (선택)" />
+        <p class="hint">구글 북스 API 키를 입력하세요. API 키가 없어도 일부 무료 한도 내에서 기본 검색이 가능합니다.</p>
+      </div>
     </div>
-  </div>
 
-  <!-- 체크박스 설정: 엄격한 매칭 -->
-  <div class="ubs-plugin-field">
-    <div class="ubs-label-spacer"></div>
-    <div class="ubs-input-container">
-      <label class="ubs-checkbox-label" for="ubs-strict-match">
-        <input id="ubs-strict-match" type="checkbox" name="STRICT_MATCH" value="true" />
-        <span>검색 결과 엄격한 필터링</span>
-      </label>
-      <p class="hint">체크 시, 검색어 단어 목록이 수집된 도서 제목 내에 실제로 정확하게 포함되어 있는 결과만 통과시킵니다. (제목 검색 시에만 적용)</p>
+    <div class="ubs-plugin-field">
+      <div class="ubs-label-spacer"></div>
+      <div class="ubs-input-container">
+        <label class="ubs-checkbox-label" for="ubs-strict-match">
+          <input id="ubs-strict-match" type="checkbox" name="STRICT_MATCH" value="true" />
+          <span>검색 결과 엄격한 필터링</span>
+        </label>
+        <p class="hint">체크 시, 검색어 단어 목록이 수집된 도서 제목 내에 실제로 정확하게 포함되어 있는 결과만 통과시킵니다.</p>
+      </div>
     </div>
   </div>
 </div>
