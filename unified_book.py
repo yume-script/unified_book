@@ -199,7 +199,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             futures = {}
             with ThreadPoolExecutor(max_workers=len(sources)) as executor:
                 for source_name, func, args in sources:
-                    if source_name != '구글' and not all(args):
+                    if not all(args):
+                        print(f"{LOG_PREFIX} {source_name}({mode_label}) - API 키 미설정으로 건너뜀 (바이패스)")
                         continue
                     print(f"{LOG_PREFIX} {source_name}({mode_label}) - 검색 요청 전송")
                     # 비동기 백그라운드 쿼리 등록
