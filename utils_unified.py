@@ -1,18 +1,8 @@
 # -*- coding: utf-8 -*-
-import os
 import re
-import zipfile
-import html
+import sys
 import urllib.request
-import urllib.parse
-import xml.etree.ElementTree as ET
-
-# pypdf 라이브러리 탑재 여부 감지
-try:
-    import pypdf
-    PYPDF_AVAILABLE = True
-except ImportError:
-    PYPDF_AVAILABLE = False
+import urllib.error
 
 
 def parse_bool(val, default=False):
@@ -28,9 +18,11 @@ def parse_bool(val, default=False):
         return False
     return default
 
+
 def format_date(date_str):
     """날짜 형식을 YYYY-MM-DD로 표준화"""
-    if not date_str: return ""
+    if not date_str:
+        return ""
     digits = re.sub(r'\D', '', date_str)
     if len(digits) >= 8:
         return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
@@ -41,17 +33,22 @@ def format_date(date_str):
         return f"{digits}-01-01"
     return date_str
 
+
 def get_high_res_url(url, source):
     """서점 API별 커버 이미지 최고해상도 원본 치환 및 파라미터 정제"""
-    if not url: return url
+    if not url:
+        return url
     if source == '알라딘':
         url = url.replace('coversum.jpg', 'cover500.jpg').replace('covermid.jpg', 'cover500.jpg')
     elif source == '네이버':
-        if '?' in url: url = url.split('?')[0]
+        if '?' in url:
+            url = url.split('?')[0]
     elif source == '구글':
         url = url.replace('zoom=1', 'zoom=3').replace('zoom=5', 'zoom=3')
-        if 'edge=curl' in url: url = url.replace('edge=curl', '')
+        if 'edge=curl' in url:
+            url = url.replace('edge=curl', '')
     return url
+
 
 def validate_isbn13(isbn):
     """ISBN-13 체크디지트 검사 (Mod 10 방식)"""
@@ -63,6 +60,7 @@ def validate_isbn13(isbn):
         return checksum % 10 == 0
     except ValueError:
         return False
+
 
 def validate_isbn10(isbn):
     """ISBN-10 체크디지트 검사 (Mod 11 방식)"""
@@ -81,189 +79,79 @@ def validate_isbn10(isbn):
     except ValueError:
         return False
 
+
 def compare_isbns(isbn_a, isbn_b):
     """10자리와 13자리 ISBN의 형식을 정규화하여 상호 교차 대조"""
     clean_a = re.sub(r'[^0-9X]', '', str(isbn_a or '').upper())
     clean_b = re.sub(r'[^0-9X]', '', str(isbn_b or '').upper())
-    
+
     if not clean_a or not clean_b:
         return False
     if clean_a == clean_b:
         return True
-        
+
     # 10자리와 13자리가 섞여 들어왔을 때 핵심 서지 번호(9자리) 일치 여부 판별
     if len(clean_a) == 13 and len(clean_b) == 10:
         return clean_a[3:12] == clean_b[0:9]
     if len(clean_a) == 10 and len(clean_b) == 13:
         return clean_a[0:9] == clean_b[3:12]
-        
+
     return False
 
-def extract_isbn_from_epub(epub_path):
-    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (로컬 정규식 매칭 전용)"""
-    try:
-        with zipfile.ZipFile(epub_path, 'r') as epub:
-            container_content = epub.read('META-INF/container.xml')
-            root = ET.fromstring(container_content)
-            opf_path = ""
-            for elem in root.iter():
-                if elem.tag.endswith('rootfile'):
-                    opf_path = elem.attrib.get('full-path', '')
-                    break
-            if not opf_path:
-                return None, None
-            
-            opf_content = epub.read(opf_path)
-            opf_root = ET.fromstring(opf_content)
-            
-            # 1단계: 표준 메타데이터 태그(<dc:identifier>)에서 ISBN 탐색
-            for elem in opf_root.iter():
-                if elem.tag.endswith('identifier') and elem.text:
-                    clean = re.sub(r'[^0-9X]', '', elem.text.upper())
-                    if validate_isbn13(clean) or validate_isbn10(clean):
-                        return clean, "LOCAL"
-            
-            # 2단계 백업: 본문 XHTML 파일 분석 (앞쪽 8장 + 뒤쪽 8장 대역 확장 분석)
-            manifest = {}
-            for elem in opf_root.iter():
-                if elem.tag.endswith('item'):
-                    item_id = elem.attrib.get('id')
-                    href = elem.attrib.get('href')
-                    if item_id and href:
-                        manifest[item_id] = href
-            
-            spine_item_ids = []
-            for elem in opf_root.iter():
-                if elem.tag.endswith('itemref'):
-                    idref = elem.attrib.get('idref')
-                    if idref:
-                        spine_item_ids.append(idref)
-            
-            # 판권지가 앞쪽에 조판되었을 경우를 대비해 전방 8장, 후방 8장 대역 수집
-            num_spines = len(spine_item_ids)
-            target_spines = list(range(min(8, num_spines)))
-            if num_spines > 8:
-                target_spines.extend(list(range(max(8, num_spines - 8), num_spines)))
-            target_spines = sorted(list(set(target_spines)))
-            
-            opf_dir = os.path.dirname(opf_path)
-            
-            # [초고속 조기 종료 필터 1]: 만화책/스캔본 전용 EPUB 판별
-            # 앞쪽 3장의 텍스트 정보가 공백 제외 20자 미만인 경우 이미지 중심의 도서로 간주하고 즉시 조기 종료
-            sample_epub_text = ""
-            check_spines = target_spines[:3]
-            for idx in check_spines:
-                spine_id = spine_item_ids[idx]
-                href = manifest.get(spine_id)
-                if href:
-                    href = urllib.parse.unquote(href)
-                    full_href = os.path.join(opf_dir, href) if opf_dir else href
-                    full_href = full_href.replace('\\', '/')
-                    try:
-                        html_data = epub.read(full_href).decode('utf-8', errors='ignore')
-                        text_data = re.sub('<[^<]+?>', '', html.unescape(html_data))
-                        sample_epub_text += text_data.strip()
-                    except Exception:
-                        pass
-            if len(re.sub(r'\s', '', sample_epub_text)) < 20:
-                return None, None  # 이미지 전용책이므로 실시간 수색 종료
-            
-            isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
-            isbn10_candidates = []
-            
-            for idx in target_spines:
-                spine_id = spine_item_ids[idx]
-                href = manifest.get(spine_id)
-                if href:
-                    href = urllib.parse.unquote(href)
-                    full_href = os.path.join(opf_dir, href) if opf_dir else href
-                    full_href = full_href.replace('\\', '/')
-                    
-                    try:
-                        raw_data = epub.read(full_href).decode('utf-8', errors='ignore')
-                        html_content = html.unescape(raw_data)
-                        text_content = re.sub('<[^<]+?>', '', html_content)
-                        text_content = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text_content)
-                        
-                        for match in isbn_pat.findall(text_content):
-                            clean = re.sub(r'[^0-9X]', '', match.upper())
-                            if validate_isbn13(clean) or validate_isbn10(clean):
-                                return clean, "LOCAL"
-                            elif validate_isbn10(clean):
-                                isbn10_candidates.append(clean)
-                    except Exception:
-                        pass
-                        
-            if isbn10_candidates:
-                return isbn10_candidates[0], "LOCAL"
-                    
-    except Exception:
-        pass
-    return None, None
 
-def extract_isbn_from_pdf(pdf_path):
-    """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (로컬 정규식 매칭 전용)"""
-    if not PYPDF_AVAILABLE:
-        return None, None
-        
+def extract_isbn_from_link(url, timeout=6):
+    """
+    books.link 컬럼에 저장된 도서 상세 페이지 URL의 HTML을 가져와 ISBN을 탐색합니다.
+    1) 'ISBN' 라벨 바로 옆에 값이 붙어있는 구조를 우선 탐색 (네이버/교보 등 대부분의 서점 상세페이지)
+    2) 실패 시 페이지 전체에서 숫자열 후보를 뽑아 체크섬으로 검증 (폴백)
+    """
+    if not url or not str(url).lower().startswith(('http://', 'https://')):
+        return None
+
     try:
-        with open(pdf_path, 'rb') as f:
-            reader = pypdf.PdfReader(f)
-            num_pages = len(reader.pages)
-            if num_pages == 0:
-                return None, None
-                
-            # 💡 [초고속 조기 종료 필터 2]: 스캔본(통 이미지) 전용 PDF 판별 전방 5p, 후방 5p 확장 감지
-            # 표지를 제외한 본문 초입부(1~5페이지)와 맨 뒷부분(끝에서 5페이지)에서 임시 텍스트 추출을 먼저 시도합니다.
-            # 전/후방 양쪽 구역 모두 글자 데이터가 아예 없는 경우에만 스캔본(통 이미지)으로 판정하고 즉시 스캔을 중단합니다.
-            check_indices = list(range(1, min(6, num_pages)))
-            if num_pages > 5:
-                check_indices.extend(list(range(max(5, num_pages - 5), num_pages)))
-                
-            check_indices = sorted(list(set(check_indices)))
-            if not check_indices:
-                check_indices = [0]
-                
-            sample_text = ""
-            for idx in check_indices:
-                try:
-                    p_text = reader.pages[idx].extract_text()
-                    if p_text:
-                        sample_text += p_text.strip()
-                except Exception:
-                    pass
-            if not sample_text.strip():
-                return None, None # 전후방 모두 글자가 전혀 긁히지 않는 스캔 도서이므로 실시간 수색 조기 종료
-                
-            pages_to_scan = list(range(min(30, num_pages)))
-            if num_pages > 30:
-                pages_to_scan.extend(list(range(max(30, num_pages - 30), num_pages)))
-                
-            pages_to_scan = sorted(list(set(pages_to_scan)))
-            isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
-            isbn10_candidates = []
-            
-            for page_idx in pages_to_scan:
-                text = reader.pages[page_idx].extract_text()
-                if not text:
-                    continue
-                
-                # PDF 특유의 인코딩 문제로 인한 유니코드 대시 기호를 표준 하이픈(-)으로 표준화
-                text = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text)
-                
-                for match in isbn_pat.findall(text):
-                    clean = re.sub(r'[^0-9X]', '', match.upper())
-                    if validate_isbn13(clean):
-                        return clean, "LOCAL"
-                    elif validate_isbn10(clean):
-                        isbn10_candidates.append(clean)
-                        
-            if isbn10_candidates:
-                return isbn10_candidates[0], "LOCAL"
-                    
-    except Exception:
-        pass
-    return None, None
+        req = urllib.request.Request(
+            url, headers={'User-Agent': 'Mozilla/5.0 (compatible; UnifiedBookBot/1.0)'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            content_type = response.headers.get('Content-Type', '')
+            if content_type and 'text/html' not in content_type:
+                return None
+            raw = response.read(1_500_000)  # 대형 SSR 쇼핑몰 페이지 대응을 위해 1.5MB까지 확인
+            page_text = raw.decode('utf-8', errors='ignore')
+    except Exception as e:
+        print(f"[통합 도서 검색] 링크 ISBN 파싱 실패: {url} 사유: {e}", file=sys.stderr)
+        return None
+
+    # 스크립트/스타일 블록은 노이즈(해시 파일명, 리다이렉트 파라미터 등)만 늘리므로 먼저 제거
+    cleaned = re.sub(r'<script\b[^>]*>.*?</script>', ' ', page_text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r'<style\b[^>]*>.*?</style>', ' ', cleaned, flags=re.DOTALL | re.IGNORECASE)
+
+    def _validate_candidates(cands):
+        for cand in cands:
+            clean = re.sub(r'[^0-9Xx]', '', cand).upper()
+            if validate_isbn13(clean):
+                return clean
+        for cand in cands:
+            clean = re.sub(r'[^0-9Xx]', '', cand).upper()
+            if validate_isbn10(clean):
+                return clean
+        return None
+
+    # 1단계: 'ISBN'이라는 라벨 뒤 200자 이내에서 값 추출 (네이버/교보/알라딘 등 상세페이지 공통 패턴)
+    label_matches = re.findall(
+        r'ISBN[^0-9Xx]{0,200}?([\dXx][\dXx\-\s]{8,17}[\dXx])',
+        cleaned, flags=re.IGNORECASE
+    )
+    result = _validate_candidates(label_matches)
+    if result:
+        return result
+
+    # 2단계 (폴백): 페이지 전체에서 ISBN처럼 생긴 숫자열을 모두 뽑아 체크섬으로 검증
+    candidates = re.findall(
+        r'(?:97[89][-\s]?)?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,6}[-\s]?[\dXx]', cleaned
+    )
+    return _validate_candidates(candidates)
+
 
 def get_row_val(row, key, default=''):
     """sqlite3.Row 및 dict 호환을 위해 에러 없이 안전하게 값을 추출하는 헬퍼"""
