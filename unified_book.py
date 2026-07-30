@@ -87,11 +87,16 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         {"key": "NL_API_KEY", "label": "국립중앙도서관 인증키 (cert_key)", "type": "text", "required": False},
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
         {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
-        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
+        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "password", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
-        {"key": "COVER_PRIORITY", "label": "표지(Cover) 우선 소스", "type": "select",
-         "options": ["알라딘", "국립중앙도서관", "네이버", "구글"], "default": "알라딘", "required": False},
-        {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False}
+        {"key": "COVER_PRIORITY", "label": "표지(Cover) 우선 소스", "type": "select", "default": "알라딘",
+         "options": [
+             {"value": "알라딘", "label": "알라딘"},
+             {"value": "국립중앙도서관", "label": "국립중앙도서관"},
+             {"value": "네이버", "label": "네이버"},
+             {"value": "구글", "label": "구글"}
+         ], "required": False},
+        {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "default": False, "required": False}
     ]
 
     def search(self, db_type, query):
