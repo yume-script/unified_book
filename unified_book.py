@@ -78,9 +78,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
         {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
-        {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
-        {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
-        {"key": "LITELLM_MODEL", "label": "LiteLLM 모델명 (선택)", "type": "text", "required": False},
         {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
         {"key": "ISBN_FILE_SCAN", "label": "도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도", "type": "checkbox", "required": False}
     ]
@@ -95,9 +92,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             config = self.get_plugin_config(db_type, default={})
             strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
             isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
-            gemini_key = config.get("GEMINI_API_KEY", "").strip()
-            llm_endpoint = config.get("LITELLM_ENDPOINT", "").strip()
-            llm_model = config.get("LITELLM_MODEL", "").strip()
 
             # 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
             clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
@@ -147,9 +141,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             if file_path and os.path.exists(file_path):
                                 ext = os.path.splitext(file_path)[1].lower()
                                 if ext == '.epub':
-                                    extracted_isbn, method = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
+                                    extracted_isbn, method = extract_isbn_from_epub(file_path)
                                 elif ext == '.pdf':
-                                    extracted_isbn, method = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
+                                    extracted_isbn, method = extract_isbn_from_pdf(file_path)
 
                             if extracted_isbn:
                                 is_isbn = True
@@ -209,8 +203,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                                         item['title'] = f"[{source_name}/DB] {original_title} *"
                                     elif detection_source == "LOCAL":
                                         item['title'] = f"[{source_name}/LOCAL] {original_title} *"
-                                    elif detection_source == "AI":
-                                        item['title'] = f"[{source_name}/AI] {original_title} *"
                                     else:
                                         item['title'] = f"[{source_name}/ISBN] {original_title} *"
                                 else:

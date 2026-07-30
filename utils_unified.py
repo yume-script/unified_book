@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
 import re
-import sys
 import zipfile
 import html
-import json
 import urllib.request
 import urllib.parse
-import urllib.error
 import xml.etree.ElementTree as ET
 
 # pypdf 라이브러리 탑재 여부 감지
@@ -102,101 +99,8 @@ def compare_isbns(isbn_a, isbn_b):
         
     return False
 
-def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
-    """구글 Gemini API 및 LiteLLM(OpenAI 호환) 프록시를 모두 지원하는 통합 지능형 판독 엔진"""
-    if not text.strip():
-        return None
-        
-    # gemini-3.5-flash-lite 모델을 활용해 속도 및 비용 최적화 (2026년 7월 21일 출시 모델)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
-    
-    # 잡담을 배제하고 오직 규정된 스키마의 JSON 오브젝트만 반환하도록 기계적 설계
-    prompt = (
-        "다음 도서 판권지/본문 텍스트에서 ISBN 번호만 추출해줘.\n"
-        "출력은 반드시 다른 미사여구 없이 JSON 형식으로만 해야 하며, 그 구조는 반드시 다음 스키마를 따라야 해:\n"
-        "{\"isbn\": \"공백이나 하이픈을 제거한 오직 10자리 또는 13자리 숫자(마지막 X 허용) 문자열 (발견되지 않으면 빈 문자열)\"}\n\n"
-        f"[텍스트 본문]\n{text}"
-    )
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json", # 구글 공식 JSON 모드 활성화로 수다스러운 답변 완전 차단
-            "temperature": 0.1,
-            "maxOutputTokens": 100
-        }
-    }
-    
-    # 1. LiteLLM / OpenAI 호환 모드 연동
-    if endpoint and endpoint.strip():
-        url = endpoint.strip()
-        target_model = model.strip() if model and model.strip() else "gemini/gemini-3.5-flash-lite"
-        
-        payload = {
-            "model": target_model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"}  # OpenAI JSON 모드 명시
-        }
-        
-        headers = {'Content-Type': 'application/json'}
-        if api_key and api_key.strip():
-            headers['Authorization'] = f"Bearer {api_key.strip()}"
-            
-        try:
-            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as response:
-                res_data = json.loads(response.read().decode('utf-8'))
-                choices = res_data.get('choices', [])
-                if choices:
-                    raw_content = choices[0].get('message', {}).get('content', '').strip()
-                    res_json = json.loads(raw_content)
-                    raw_isbn = res_json.get('isbn', '')
-                    clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
-                    if validate_isbn13(clean) or validate_isbn10(clean):
-                        return clean
-        except urllib.error.HTTPError as he:
-            error_msg = he.read().decode('utf-8', errors='ignore')
-            print(f"[LiteLLM API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
-        except Exception as e:
-            print(f"[LiteLLM API 에러] 사유: {str(e)}", file=sys.stderr)
-
-    # 2. 순수 Google Gemini 공식 API 모드 연동
-    else:
-        if not api_key:
-            return None
-        try:
-            req = urllib.request.Request(
-                url, 
-                data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}
-            )
-            with urllib.request.urlopen(req, timeout=12) as response:
-                res_data = json.loads(response.read().decode('utf-8'))
-                candidates = res_data.get('candidates', [])
-                if candidates:
-                    parts = candidates[0].get('content', {}).get('parts', [])
-                    if parts:
-                        raw_text = parts[0].get('text', '').strip()
-                        res_json = json.loads(raw_text)
-                        raw_isbn = res_json.get('isbn', '')
-                        clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
-                        if validate_isbn13(clean) or validate_isbn10(clean):
-                            return clean
-        except urllib.error.HTTPError as he:
-            error_msg = he.read().decode('utf-8', errors='ignore')
-            print(f"[Gemini API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
-        except Exception as e:
-            print(f"[Gemini API 에러] 사유: {str(e)}", file=sys.stderr)
-            
-    return None
-
-def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_model=None):
-    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (지능형 LLM 듀얼 분기 가동)"""
+def extract_isbn_from_epub(epub_path):
+    """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (로컬 정규식 매칭 전용)"""
     try:
         with zipfile.ZipFile(epub_path, 'r') as epub:
             container_content = epub.read('META-INF/container.xml')
@@ -266,7 +170,6 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
             
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
             isbn10_candidates = []
-            compiled_texts = []
             
             for idx in target_spines:
                 spine_id = spine_item_ids[idx]
@@ -282,9 +185,6 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                         text_content = re.sub('<[^<]+?>', '', html_content)
                         text_content = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text_content)
                         
-                        if text_content.strip():
-                            compiled_texts.append(text_content)
-                        
                         for match in isbn_pat.findall(text_content):
                             clean = re.sub(r'[^0-9X]', '', match.upper())
                             if validate_isbn13(clean) or validate_isbn10(clean):
@@ -296,20 +196,13 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                         
             if isbn10_candidates:
                 return isbn10_candidates[0], "LOCAL"
-                
-            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 LLM 전송 판독
-            if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
-                full_text = "\n".join(compiled_texts)[:12000]
-                llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
-                if llm_isbn:
-                    return llm_isbn, "AI"
                     
     except Exception:
         pass
     return None, None
 
-def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_model=None):
-    """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (지능형 LLM 듀얼 분기 가동)"""
+def extract_isbn_from_pdf(pdf_path):
+    """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (로컬 정규식 매칭 전용)"""
     if not PYPDF_AVAILABLE:
         return None, None
         
@@ -349,7 +242,6 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
             pages_to_scan = sorted(list(set(pages_to_scan)))
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
             isbn10_candidates = []
-            compiled_texts = []
             
             for page_idx in pages_to_scan:
                 text = reader.pages[page_idx].extract_text()
@@ -358,9 +250,6 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 
                 # PDF 특유의 인코딩 문제로 인한 유니코드 대시 기호를 표준 하이픈(-)으로 표준화
                 text = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text)
-                
-                if text.strip():
-                    compiled_texts.append(text)
                 
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
@@ -371,13 +260,6 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                         
             if isbn10_candidates:
                 return isbn10_candidates[0], "LOCAL"
-                
-            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 LLM 전송 판독
-            if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
-                full_text = "\n".join(compiled_texts)[:12000]
-                llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
-                if llm_isbn:
-                    return llm_isbn, "AI"
                     
     except Exception:
         pass
