@@ -2,6 +2,7 @@
 import os
 import re
 import sys
+import difflib
 import urllib.request
 import urllib.parse
 import hashlib
@@ -290,10 +291,11 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 if not merged.get('title'):
                     continue
 
-                _log("4단계/합성", f"'{merged.get('title')}' <- 참여 소스: {'+'.join(contributing)}, ISBN: {merged.get('isbn') or '없음'}")
-
                 merged_isbn_clean = re.sub(r'[^0-9X]', '', str(merged.get('isbn', '')).upper())
                 has_isbn = is_valid_isbn(merged_isbn_clean)
+
+                # 검색어와 후보 제목 간 유사도 점수 (0~1). ISBN 모드에서는 항상 동일 도서이므로 최고점 고정.
+                title_score = 1.0 if is_isbn_mode else difflib.SequenceMatcher(None, norm_query, g['norm_title']).ratio()
 
                 label_sources = "·".join(contributing)
                 if is_isbn_mode:
@@ -306,13 +308,17 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 if merged.get('isbn'):
                     merged['pubDate'] = f"{merged.get('pubDate', '')} | ISBN: {merged['isbn']}"
 
+                _log("4단계/합성", f"'{merged.get('title')}' <- 참여 소스: {'+'.join(contributing)}, ISBN: {merged.get('isbn') or '없음'}, 제목유사도: {title_score:.2f}")
+
                 merged['_has_isbn'] = has_isbn
+                merged['_title_score'] = title_score
                 merged_results.append(merged)
 
-            # 정렬 우선순위: ISBN 일치 항목 우선, 그 다음 책 제목 일치(검색 완료 순서) 순
-            merged_results.sort(key=lambda x: 0 if x.get('_has_isbn') else 1)
+            # 정렬 우선순위: 1) ISBN 일치 항목 우선, 2) 그 다음 검색어와의 책 제목 유사도가 높은 순
+            merged_results.sort(key=lambda x: (0 if x.get('_has_isbn') else 1, -x.get('_title_score', 0)))
             for m in merged_results:
                 m.pop('_has_isbn', None)
+                m.pop('_title_score', None)
 
             _log("4단계/합성", f"정렬 완료, 최종 후보 {len(merged_results)}건 반환")
             return merged_results

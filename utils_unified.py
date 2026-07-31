@@ -326,7 +326,11 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
             if len(re.sub(r'\s', '', sample_epub_text)) < 20:
                 return None, None  # 이미지 전용책이므로 실시간 수색 종료
             
+            # "ISBN"이라는 글자 바로 옆에 붙은 숫자를 최우선으로 신뢰 (광고/추천도서 페이지의 다른 책 ISBN 오인식 방지)
+            anchored_pat = re.compile(r'ISBN[^0-9]{0,12}([0-9][0-9\-\s]{8,20}[0-9Xx])', re.IGNORECASE)
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
+            anchored_candidates = []
+            blind_isbn13_candidates = []
             isbn10_candidates = []
             compiled_texts = []
             
@@ -347,15 +351,25 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                         if text_content.strip():
                             compiled_texts.append(text_content)
                         
+                        for raw_match in anchored_pat.findall(text_content):
+                            clean = re.sub(r'[^0-9X]', '', raw_match.upper())
+                            if validate_isbn13(clean) or validate_isbn10(clean):
+                                anchored_candidates.append(clean)
+                        
                         for match in isbn_pat.findall(text_content):
                             clean = re.sub(r'[^0-9X]', '', match.upper())
-                            if validate_isbn13(clean) or validate_isbn10(clean):
-                                return clean, "LOCAL"
+                            if validate_isbn13(clean):
+                                blind_isbn13_candidates.append(clean)
                             elif validate_isbn10(clean):
                                 isbn10_candidates.append(clean)
                     except Exception:
                         pass
-                        
+            
+            # 신뢰도 우선순위: ISBN 라벨 인접 매칭 > 블라인드 13자리 > 블라인드 10자리
+            if anchored_candidates:
+                return anchored_candidates[0], "LOCAL"
+            if blind_isbn13_candidates:
+                return blind_isbn13_candidates[0], "LOCAL"
             if isbn10_candidates:
                 return isbn10_candidates[0], "LOCAL"
                 
@@ -409,7 +423,10 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 pages_to_scan.extend(list(range(max(30, num_pages - 30), num_pages)))
                 
             pages_to_scan = sorted(list(set(pages_to_scan)))
+            anchored_pat = re.compile(r'ISBN[^0-9]{0,12}([0-9][0-9\-\s]{8,20}[0-9Xx])', re.IGNORECASE)
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
+            anchored_candidates = []
+            blind_isbn13_candidates = []
             isbn10_candidates = []
             compiled_texts = []
             
@@ -424,13 +441,23 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 if text.strip():
                     compiled_texts.append(text)
                 
+                for raw_match in anchored_pat.findall(text):
+                    clean = re.sub(r'[^0-9X]', '', raw_match.upper())
+                    if validate_isbn13(clean) or validate_isbn10(clean):
+                        anchored_candidates.append(clean)
+                
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
                     if validate_isbn13(clean):
-                        return clean, "LOCAL"
+                        blind_isbn13_candidates.append(clean)
                     elif validate_isbn10(clean):
                         isbn10_candidates.append(clean)
-                        
+            
+            # 신뢰도 우선순위: ISBN 라벨 인접 매칭 > 블라인드 13자리 > 블라인드 10자리
+            if anchored_candidates:
+                return anchored_candidates[0], "LOCAL"
+            if blind_isbn13_candidates:
+                return blind_isbn13_candidates[0], "LOCAL"
             if isbn10_candidates:
                 return isbn10_candidates[0], "LOCAL"
                 
