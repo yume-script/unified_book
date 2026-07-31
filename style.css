@@ -65,3 +65,51 @@
         max-width: 100%;
     }
 }
+
+/* 고급 옵션(LLM 관련) 접이식 섹션 */
+.ubs-advanced-section {
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    margin-bottom: 1.2rem;
+    padding: 0.2rem 1rem;
+    background: rgba(15, 23, 42, 0.35);
+}
+
+.ubs-advanced-section summary {
+    cursor: pointer;
+    color: #e2e8f0;
+    font-weight: 700;
+    font-size: 0.86rem;
+    padding: 0.7rem 0;
+    list-style: none;
+    user-select: none;
+}
+
+.ubs-advanced-section summary::-webkit-details-marker {
+    display: none;
+}
+
+.ubs-advanced-section summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 0.5rem;
+    color: #94a3b8;
+    transition: transform 0.15s;
+}
+
+.ubs-advanced-section[open] summary::before {
+    transform: rotate(90deg);
+}
+
+.ubs-advanced-body {
+    padding: 0.2rem 0 0.8rem 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ubs-advanced-desc {
+    margin: 0.7rem 0 1rem 0 !important;
+}
+
+.ubs-advanced-body .ubs-plugin-field {
+    margin-bottom: 0.9rem;
+}
