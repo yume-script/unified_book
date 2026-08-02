@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
 import re
-import sys
-import difflib
 import urllib.request
 import urllib.parse
 import hashlib
 import io
+import zipfile
+import json
+import html
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     from PIL import Image
@@ -14,11 +16,6 @@ except ImportError:
     Image = None
 
 from plugins.metadata.base import BaseMetadataProvider
-
-
-def _log(stage, message):
-    """단계별 진행 상황을 서버 로그(stderr)에 남기는 헬퍼. [UnifiedBook][n단계] 형태로 표기됩니다."""
-    print(f"[UnifiedBook][{stage}] {message}", file=sys.stderr)
 
 # 임포트 섀도잉(Import Shadowing) 원천 차단 및 새로운 utils_unified 동적 로드 지원
 def _import_local_module(module_name):
@@ -36,43 +33,30 @@ try:
     from .naver import search_naver, search_naver_isbn
     from .google import search_google
     from .utils_unified import (
-        format_date, get_high_res_url, validate_isbn13, validate_isbn10, is_valid_isbn,
-        compare_isbns, extract_isbn_from_epub, extract_isbn_from_pdf, extract_isbn_from_text,
-        merge_book_sources, get_row_val, parse_bool
+        format_date, get_high_res_url, validate_isbn13, validate_isbn10, 
+        compare_isbns, extract_isbn_from_epub, extract_isbn_from_pdf, get_row_val, parse_bool
     )
 except ImportError:
     _aladin_mod = _import_local_module("aladin")
     _naver_mod = _import_local_module("naver")
     _google_mod = _import_local_module("google")
     _utils_mod = _import_local_module("utils_unified")
-
+    
     search_aladin = _aladin_mod.search_aladin
     search_aladin_isbn = _aladin_mod.search_aladin_isbn
     search_naver = _naver_mod.search_naver
     search_naver_isbn = _naver_mod.search_naver_isbn
     search_google = _google_mod.search_google
-
+    
     format_date = _utils_mod.format_date
     get_high_res_url = _utils_mod.get_high_res_url
     validate_isbn13 = _utils_mod.validate_isbn13
     validate_isbn10 = _utils_mod.validate_isbn10
-    is_valid_isbn = _utils_mod.is_valid_isbn
     compare_isbns = _utils_mod.compare_isbns
     extract_isbn_from_epub = _utils_mod.extract_isbn_from_epub
     extract_isbn_from_pdf = _utils_mod.extract_isbn_from_pdf
-    extract_isbn_from_text = _utils_mod.extract_isbn_from_text
-    merge_book_sources = _utils_mod.merge_book_sources
     get_row_val = _utils_mod.get_row_val
     parse_bool = _utils_mod.parse_bool
-
-
-# 서지 정보 병합 시 기본 우선순위 (알라딘 > 네이버 > 구글)
-INFO_SOURCE_PRIORITY = ('알라딘', '네이버', '구글')
-# 표지(Cover) 우선순위 설정에서 선택 가능한 값 목록
-COVER_SOURCE_OPTIONS = ('알라딘', '네이버', '구글')
-
-# ISBN 판독 출처 태그 -> 검색 결과 라벨 표기용 매핑
-DETECTION_TAG_LABEL = {"INPUT": "ISBN", "DB": "DB", "LOCAL": "LOCAL", "AI": "AI"}
 
 
 class UnifiedBookMetadataProvider(BaseMetadataProvider):
@@ -84,7 +68,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "enabled": True,
         "provider": "github-raw",
         "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/refs/heads/main/",
-        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "utils_unified.py", "index.html", "style.css", "__init__.py", "VERSION"],
+        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "utils_unified.py", "settings.html", "settings.css", "__init__.py", "VERSION"],
         "version_file": "VERSION",
         "version_key": "plugin version",
         "show_sample_update_button": True,
@@ -97,11 +81,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
         {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
         {"key": "LITELLM_MODEL", "label": "LiteLLM 모델명 (선택)", "type": "text", "required": False},
-        {"key": "COVER_PRIORITY", "label": "표지(Cover) 우선 소스", "type": "select", "required": False, "options": [
-            {"value": "알라딘", "label": "알라딘 우선"},
-            {"value": "네이버", "label": "네이버 우선"},
-            {"value": "구글", "label": "구글 우선"},
-        ]},
         {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
         {"key": "ISBN_FILE_SCAN", "label": "도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도", "type": "checkbox", "required": False}
     ]
@@ -109,21 +88,14 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     def search(self, db_type, query):
         if not query:
             return []
-
-        _log("검색시작", f"query='{query}'")
-
+            
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
         gemini_key = config.get("GEMINI_API_KEY", "").strip()
         llm_endpoint = config.get("LITELLM_ENDPOINT", "").strip()
         llm_model = config.get("LITELLM_MODEL", "").strip()
-
-        cover_pref = (config.get("COVER_PRIORITY") or "알라딘").strip()
-        if cover_pref not in COVER_SOURCE_OPTIONS:
-            cover_pref = "알라딘"
-        cover_priority = [cover_pref] + [s for s in COVER_SOURCE_OPTIONS if s != cover_pref]
-
+        
         # 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
         clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
         clean_query_base = re.sub(r'\[.*?\]|\(.*?\)', '', clean_query_base).strip()
@@ -131,201 +103,125 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             clean_query_base = query
 
         norm_query = "".join(re.findall(r'\w+', clean_query_base.replace('_', ''))).lower()
-
+        
         # 입력받은 기본 검색어가 이미 유효한 ISBN 구성인지 우선 감지
         clean_query = re.sub(r'[^0-9X]', '', query.upper())
-        is_isbn = is_valid_isbn(clean_query)
+        is_isbn = validate_isbn13(clean_query) or validate_isbn10(clean_query)
         search_query = clean_query if is_isbn else query
-
+        
         # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
         detection_source = "INPUT" if is_isbn else None
-        if is_isbn:
-            _log("0단계/INPUT", f"입력값이 이미 유효한 ISBN으로 확인됨: {search_query}")
 
-        # 입력값 자체가 ISBN이 아닐 경우, 아래 1~2단계를 순서대로 시도하여 ISBN 선확보를 시도
+        # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
-
+            
             # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
-            book = gateway.fetch_one("SELECT file_path, isbn, link FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
+            book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
             if not book:
-                book = gateway.fetch_one("SELECT file_path, isbn, link FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
-
+                book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
+                
             # 유연한 부분일치 검색 추가 가동
             if not book:
                 words = [w for w in clean_query_base.split() if len(w) > 1]
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
-                    book = gateway.fetch_one("SELECT file_path, isbn, link FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
-
+                    book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
+                
             if book:
-                file_path = get_row_val(book, 'file_path')
-                _log("DB조회", f"매칭된 도서 발견: file_path={file_path}")
-
-                # ---- 1단계: [로컬 파싱] 도서 파일(EPUB/PDF) 내부에서 직접 ISBN 추출 ----
-                if isbn_file_scan and file_path and os.path.exists(file_path):
-                    ext = os.path.splitext(file_path)[1].lower()
-                    _log("1단계/로컬파싱", f"파일 스캔 시작: {file_path} (ext={ext})")
-                    extracted_isbn, method = None, None
-                    if ext == '.epub':
-                        extracted_isbn, method = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
-                    elif ext == '.pdf':
-                        extracted_isbn, method = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
-
-                    if extracted_isbn:
-                        is_isbn = True
-                        search_query = extracted_isbn
-                        detection_source = method  # 감지출처: LOCAL 또는 AI
-                        _log("1단계/로컬파싱", f"ISBN 추출 성공: {extracted_isbn} (방식={method})")
-                    else:
-                        _log("1단계/로컬파싱", "파일 내부에서 ISBN을 찾지 못함, 2단계로 이동")
-                elif not isbn_file_scan:
-                    _log("1단계/로컬파싱", "옵션이 꺼져있어 건너뜀")
-                elif not (file_path and os.path.exists(file_path)):
-                    _log("1단계/로컬파싱", f"파일이 존재하지 않아 건너뜀: {file_path}")
-
-                # ---- 2단계: [기존 DB 링크 파싱] 1단계에서 못 찾았을 경우, DB의 isbn 컬럼 및 link(서지 링크) 컬럼에서 ISBN 역추적 ----
-                if not is_isbn:
-                    db_isbn = get_row_val(book, 'isbn')
-                    clean_db_isbn = re.sub(r'[^0-9X]', '', str(db_isbn).upper()) if db_isbn else ''
-
-                    if is_valid_isbn(clean_db_isbn):
-                        is_isbn = True
-                        search_query = clean_db_isbn
-                        detection_source = "DB"
-                        _log("2단계/DB컬럼", f"books.isbn 컬럼에서 확인: {clean_db_isbn}")
-                    else:
-                        db_link = get_row_val(book, 'link')
-                        link_isbn = extract_isbn_from_text(db_link) if db_link else None
-                        if link_isbn:
+                db_isbn = get_row_val(book, 'isbn')
+                clean_db_isbn = re.sub(r'[^0-9X]', '', str(db_isbn).upper()) if db_isbn else ''
+                
+                if validate_isbn13(clean_db_isbn) or validate_isbn10(clean_db_isbn):
+                    is_isbn = True
+                    search_query = clean_db_isbn
+                    detection_source = "DB"  # 감지출처: 데이터베이스
+                else:
+                    # 파일 실시간 스캔 옵션이 켜져 있을 때만 EPUB/PDF의 무거운 헤더 디코딩을 진행함
+                    if isbn_file_scan:
+                        file_path = get_row_val(book, 'file_path')
+                        extracted_isbn, method = None, None
+                        if file_path and os.path.exists(file_path):
+                            ext = os.path.splitext(file_path)[1].lower()
+                            if ext == '.epub':
+                                extracted_isbn, method = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
+                            elif ext == '.pdf':
+                                extracted_isbn, method = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
+                                
+                        if extracted_isbn:
                             is_isbn = True
-                            search_query = link_isbn
-                            detection_source = "DB"
-                            _log("2단계/링크파싱", f"books.link 컬럼에서 역추적 성공: {link_isbn} (원본: {db_link})")
-                        else:
-                            _log("2단계/링크파싱", "isbn/link 컬럼 모두에서 ISBN을 찾지 못함, 3단계(API 호출)로 이동")
+                            search_query = extracted_isbn
+                            detection_source = method  # 감지출처: LOCAL 또는 AI
 
-        # ---- 내부 검색 수행 전용 헬퍼 함수 (3단계 API 호출 + 4단계 합성/정렬을 함께 수행) ----
+        # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
-            raw_items = []
-
-            # 3단계: [API 호출] API KEY가 있는 소스만 병렬로 호출 (없으면 자동 바이패스, 구글은 키 없이도 호출)
-            _log("3단계/API호출", f"모드={'ISBN' if is_isbn_mode else '제목'}, 검색어='{s_query}'")
+            res = []
+            titles_seen = set()
+            
+            # 워커 스레드를 할당하여 API를 동시 다발적으로 호출
             futures = {}
-            with ThreadPoolExecutor(max_workers=max(len(sources), 1)) as executor:
+            with ThreadPoolExecutor(max_workers=len(sources)) as executor:
                 for source_name, func, args in sources:
-                    if source_name != '구글' and not all(args):
-                        _log("3단계/API호출", f"{source_name}: API 키 미설정으로 바이패스")
+                    if source_name != '구글' and not all(args): 
                         continue
+                    # 비동기 백그라운드 쿼리 등록
                     future = executor.submit(func, s_query, *args)
                     futures[future] = source_name
-
+                
+                # 먼저 완성되는 결과부터 실시간 데이터 정합성 검증 적용
                 for future in as_completed(futures):
                     source_name = futures[future]
                     try:
                         items = future.result()
-                        _log("3단계/API호출", f"{source_name}: {len(items)}건 수신")
-                    except Exception as e:
-                        _log("3단계/API호출", f"{source_name}: 호출 실패 - {e}")
+                    except Exception:
                         continue
-
+                    
                     for item in items:
                         if is_isbn_mode:
                             item_isbn = item.get('isbn', '')
                             if not compare_isbns(s_query, item_isbn):
                                 continue
-
-                        original_title = item.get('title', '') or ''
+                        
+                        original_title = item.get('title', '')
                         if not is_isbn_mode and strict_match and norm_query:
                             if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
                                 continue
 
-                        norm_title = "".join(re.findall(r'\w+', original_title)).lower()
-                        if not norm_title:
-                            continue
+                        norm = "".join(re.findall(r'\w+', original_title)).lower()
+                        if norm and norm not in titles_seen:
+                            item['cover'] = get_high_res_url(item.get('cover'), source_name)
+                            
+                            formatted_date = format_date(item.get('pubDate'))
+                            isbn = item.get('isbn', '')
+                            if isbn:
+                                item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
+                            else:
+                                item['pubDate'] = formatted_date
+                            
+                            # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
+                            if is_isbn_mode:
+                                if detection_source == "INPUT":
+                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                                elif detection_source == "DB":
+                                    item['title'] = f"[{source_name}/DB] {original_title} *"
+                                elif detection_source == "LOCAL":
+                                    item['title'] = f"[{source_name}/LOCAL] {original_title} *"
+                                elif detection_source == "AI":
+                                    item['title'] = f"[{source_name}/AI] {original_title} *"
+                                else:
+                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                            else:
+                                item['title'] = f"[{source_name}] {original_title}"
+                            
+                            item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
 
-                        item['cover'] = get_high_res_url(item.get('cover'), source_name)
-                        item['pubDate'] = format_date(item.get('pubDate'))
-                        item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if item.get('description') else ''
-                        item['title'] = original_title
-                        item['_source'] = source_name
-                        item['_norm_title'] = norm_title
-                        raw_items.append(item)
-
-            # ---- 4단계: [메타데이터 합성 및 정렬] (핵심) ----
-            # ISBN이 일치하는 항목끼리, 그 다음 책 제목이 일치하는 항목끼리 그룹핑하여 하나의 후보로 합성
-            _log("4단계/합성", f"총 {len(raw_items)}건의 원본 데이터를 그룹핑 시작")
-            groups = []
-            for item in raw_items:
-                item_isbn_clean = re.sub(r'[^0-9X]', '', str(item.get('isbn', '')).upper())
-                item_isbn_valid = item_isbn_clean if is_valid_isbn(item_isbn_clean) else ''
-                item_norm_title = item['_norm_title']
-
-                target_group = None
-                for g in groups:
-                    if item_isbn_valid and g['isbn'] and compare_isbns(item_isbn_valid, g['isbn']):
-                        target_group = g
-                        break
-                    if item_norm_title == g['norm_title']:
-                        target_group = g
-                        break
-
-                if target_group is None:
-                    target_group = {'items': {}, 'isbn': item_isbn_valid, 'norm_title': item_norm_title}
-                    groups.append(target_group)
-                elif item_isbn_valid and not target_group['isbn']:
-                    target_group['isbn'] = item_isbn_valid
-
-                source_name = item['_source']
-                # 동일 출처에서 같은 그룹으로 중복 매칭될 경우 먼저 수집된 데이터를 유지 (선착순 우선)
-                if source_name not in target_group['items']:
-                    target_group['items'][source_name] = item
-
-            _log("4단계/합성", f"{len(groups)}개의 도서 후보로 그룹핑 완료")
-
-            merged_results = []
-            for g in groups:
-                merged, contributing = merge_book_sources(
-                    g['items'], info_priority=INFO_SOURCE_PRIORITY, cover_priority=cover_priority
-                )
-                if not merged.get('title'):
-                    continue
-
-                merged_isbn_clean = re.sub(r'[^0-9X]', '', str(merged.get('isbn', '')).upper())
-                has_isbn = is_valid_isbn(merged_isbn_clean)
-
-                # 검색어와 후보 제목 간 유사도 점수 (0~1). ISBN 모드에서는 항상 동일 도서이므로 최고점 고정.
-                title_score = 1.0 if is_isbn_mode else difflib.SequenceMatcher(None, norm_query, g['norm_title']).ratio()
-
-                label_sources = "·".join(contributing)
-                if is_isbn_mode:
-                    tag = DETECTION_TAG_LABEL.get(detection_source, "ISBN")
-                    merged['title'] = f"[{label_sources}/{tag}] {merged['title']} *"
-                else:
-                    star = " *" if has_isbn else ""
-                    merged['title'] = f"[{label_sources}] {merged['title']}{star}"
-
-                if merged.get('isbn'):
-                    merged['pubDate'] = f"{merged.get('pubDate', '')} | ISBN: {merged['isbn']}"
-
-                _log("4단계/합성", f"'{merged.get('title')}' <- 참여 소스: {'+'.join(contributing)}, ISBN: {merged.get('isbn') or '없음'}, 제목유사도: {title_score:.2f}")
-
-                merged['_has_isbn'] = has_isbn
-                merged['_title_score'] = title_score
-                merged_results.append(merged)
-
-            # 정렬 우선순위: 1) ISBN 일치 항목 우선, 2) 그 다음 검색어와의 책 제목 유사도가 높은 순
-            merged_results.sort(key=lambda x: (0 if x.get('_has_isbn') else 1, -x.get('_title_score', 0)))
-            for m in merged_results:
-                m.pop('_has_isbn', None)
-                m.pop('_title_score', None)
-
-            _log("4단계/합성", f"정렬 완료, 최종 후보 {len(merged_results)}건 반환")
-            return merged_results
+                            res.append(item)
+                            titles_seen.add(norm)
+            return res
 
         results = []
 
-        # 3-1단계: ISBN이 확보된 경우, ISBN 기준으로 각 API 정밀 조회
+        # 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
         if is_isbn:
             sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
@@ -334,10 +230,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             ]
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
 
-        # 3-2단계: ISBN이 없거나 ISBN 조회 결과가 없는 경우, 제목(+저자) 기준으로 Fallback 조회
+        # 2차 백업 검색 (Fallback):
+        # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원래 책 제목 검색으로 Fallback 전환
         if not results:
-            if is_isbn:
-                _log("3단계/API호출", "ISBN 기준 조회 결과 없음, 제목 기준 Fallback으로 전환")
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
                 ('네이버', search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
@@ -345,17 +240,12 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             ]
             results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
 
-        _log("검색종료", f"최종 {len(results)}건 반환")
         return results
 
     def apply(self, db_type, book_id, item_data):
-        # ---- 5단계: [사용자 최종 확정 및 DB 저장] ----
-        # 표지/서지정보는 이미 search() 4단계에서 우선순위에 따라 합성이 완료된 상태이므로,
-        # 여기서는 사용자가 최종 선택한 합성 결과를 그대로 books 테이블에 반영합니다.
-        _log("5단계/최종저장", f"book_id={book_id}, 선택된 항목='{item_data.get('title')}'")
         if Image is None:
             return False, "Pillow 라이브러리가 필요합니다."
-
+            
         gateway = self.get_db_gateway(db_type)
         try:
             book = gateway.fetch_one("SELECT file_path, library_id FROM books WHERE id = ?", (book_id,))
@@ -368,26 +258,26 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             if cover_url:
                 try:
+                    import os
                     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
                     covers_dir = os.path.join(base_dir, 'covers', str(library_id))
                     os.makedirs(covers_dir, exist_ok=True)
                     book_hash = hashlib.md5(os.path.basename(file_path).encode('utf-8')).hexdigest()
                     cover_filename = f"book_{book_hash}.webp"
                     dest_path = os.path.join(covers_dir, cover_filename)
-
+                    
                     req = urllib.request.Request(cover_url, headers={'User-Agent': 'Mozilla/5.0'})
                     with urllib.request.urlopen(req, timeout=15) as response:
                         with Image.open(io.BytesIO(response.read())) as img:
                             img.save(dest_path, "WEBP", quality=95)
                     cover_filename = f"{library_id}/{cover_filename}"
-                except Exception:
-                    cover_filename = None
+                except: cover_filename = None
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
             pub_date_raw = item_data.get('pubDate', '')
             clean_pub_date = pub_date_raw.split(" | ISBN:")[0].replace(" *", "").strip() if pub_date_raw else ''
 
-            # UI용 접두사([출처...]) 및 별표(*)를 제거하여 순수 책 이름(title)만 추출
+            # 💡 [추가] UI용 접두사 및 별표(*)를 제거하여 순수 책 이름(title)만 추출
             raw_title = item_data.get('title', '')
             clean_title = re.sub(r'^\[.*?\]\s*', '', raw_title).replace(' *', '').strip()
             if not clean_title:
@@ -425,10 +315,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                      item_data.get('link'), clean_pub_date, cover_filename, cover_filename, cover_filename, book_id)
                 )
 
-            _log("5단계/최종저장", f"book_id={book_id} 저장 성공 (제목: {clean_title}, ISBN: {clean_isbn or '없음'})")
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
         except Exception as e:
-            _log("5단계/최종저장", f"book_id={book_id} 저장 실패: {e}")
             return False, f"적용 오류: {str(e)}"
 
     def get_context_menu_items(self, db_type, context):
