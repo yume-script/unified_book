@@ -63,8 +63,8 @@ except ImportError:
     parse_bool = _utils_mod.parse_bool
 
 
-# 서지정보(텍스트 필드) 병합 우선순위: 국립중앙도서관 > 알라딘 > 네이버 > 구글
-INFO_PRIORITY = ["국립중앙도서관", "알라딘", "네이버", "구글"]
+# 서지정보(텍스트 필드) 및 표지 병합 우선순위: 알라딘 > 국립중앙도서관 > 네이버 > 구글
+INFO_PRIORITY = ["알라딘", "국립중앙도서관", "네이버", "구글"]
 
 
 def _normalize_title(title):
@@ -177,8 +177,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
         {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
         {"key": "LITELLM_MODEL", "label": "LiteLLM 모델명 (선택)", "type": "text", "required": False},
-        {"key": "COVER_PRIORITY", "label": "표지(Cover) 우선 소스", "type": "select",
-         "options": ["알라딘", "네이버", "구글", "국립중앙도서관"], "default": "알라딘", "required": False},
         {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
         {"key": "ISBN_FILE_SCAN", "label": "도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도", "type": "checkbox", "required": False}
     ]
@@ -192,10 +190,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
-        # COVER_PRIORITY: settings.html의 select 값 ("알라딘"/"네이버"/"구글"/"국립중앙도서관")
-        cover_priority_source = (config.get("COVER_PRIORITY") or "알라딘").strip()
-        if cover_priority_source not in INFO_PRIORITY:
-            cover_priority_source = "알라딘"
         gemini_key = config.get("GEMINI_API_KEY", "").strip()
         llm_endpoint = config.get("LITELLM_ENDPOINT", "").strip()
         llm_model = config.get("LITELLM_MODEL", "").strip()
@@ -368,10 +362,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 return []
 
             # 2) [메타데이터 합성 및 정렬] 같은 책을 가리키는 결과들을 그룹으로 묶고,
-            #    표지는 설정된 우선 소스, 그 외 서지정보는 국립중앙도서관 > 알라딘 > 네이버 > 구글 순으로 합성
-            cover_priority_order = [cover_priority_source] + INFO_PRIORITY
-            seen_src = set()
-            cover_priority_order = [s for s in cover_priority_order if not (s in seen_src or seen_src.add(s))]
+            #    표지/서지정보 모두 알라딘 > 국립중앙도서관 > 네이버 > 구글 순으로 합성
+            cover_priority_order = INFO_PRIORITY
 
             groups = _group_items(all_items)
             print(f"[UnifiedBook] [4단계:메타데이터 합성] {len(all_items)}건 -> {len(groups)}개 그룹으로 병합 "
