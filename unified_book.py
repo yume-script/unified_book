@@ -186,6 +186,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         if not query:
             return []
 
+        print(f"[UnifiedBook] ===== 검색 시작 | query={query!r} db_type={db_type!r} =====")
+
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
@@ -210,8 +212,12 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
         detection_source = "INPUT" if is_isbn else None
 
+        print(f"[UnifiedBook] [1단계:로컬 파싱] 입력값 ISBN 여부={is_isbn} "
+              f"{'(search_query=' + search_query + ')' if is_isbn else '(ISBN 아님, 2단계로 진행)'}")
+
         # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
+            print(f"[UnifiedBook] [2단계:DB/파일 파싱] clean_query_base={clean_query_base!r} 로 books 테이블 조회 시작")
             gateway = self.get_db_gateway(db_type)
 
             # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
@@ -226,6 +232,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     sub_query = " ".join(words[:2])
                     book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
 
+            print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 매칭 도서={'있음' if book else '없음'}")
+
             if book:
                 db_isbn = get_row_val(book, 'isbn')
                 clean_db_isbn = re.sub(r'[^0-9X]', '', str(db_isbn).upper()) if db_isbn else ''
@@ -234,10 +242,12 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     is_isbn = True
                     search_query = clean_db_isbn
                     detection_source = "DB"  # 감지출처: 데이터베이스
+                    print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB에 저장된 ISBN 발견 -> search_query={search_query}")
                 else:
                     # 파일 실시간 스캔 옵션이 켜져 있을 때만 EPUB/PDF의 무거운 헤더 디코딩을 진행함
                     if isbn_file_scan:
                         file_path = get_row_val(book, 'file_path')
+                        print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB에 ISBN 없음 -> 파일 스캔 시도: {file_path!r}")
                         extracted_isbn, method = None, None
                         if file_path and os.path.exists(file_path):
                             ext = os.path.splitext(file_path)[1].lower()
@@ -250,9 +260,20 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             is_isbn = True
                             search_query = extracted_isbn
                             detection_source = method  # 감지출처: LOCAL 또는 AI
+                            print(f"[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔으로 ISBN 추출 성공 (경로: {method}) -> {extracted_isbn}")
+                        else:
+                            print("[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔에서도 ISBN을 찾지 못함 -> 3단계는 제목 검색으로 진행")
+                    else:
+                        print("[UnifiedBook] [2단계:DB/파일 파싱] ISBN_FILE_SCAN 옵션 꺼짐 -> 파일 스캔 건너뜀")
 
         # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
+            mode_label = "ISBN" if is_isbn_mode else "제목"
+            requested = [name for name, _func, args in sources if name == '구글' or all(args)]
+            skipped = [name for name, _func, args in sources if name != '구글' and not all(args)]
+            print(f"[UnifiedBook] [3단계:API 병렬 호출 | {mode_label} 모드] s_query={s_query!r} "
+                  f"호출 소스={requested} (API키 없어 스킵={skipped or '없음'})")
+
             # 1) 각 소스 API를 병렬 호출하여 원본 결과를 그대로 수집
             all_items = []
             futures = {}
@@ -267,9 +288,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     source_name = futures[future]
                     try:
                         items = future.result()
-                    except Exception:
+                    except Exception as e:
+                        print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name} 호출 실패: {e}")
                         continue
 
+                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name} 원본 결과 {len(items)}건 수신")
+
+                    kept_count = 0
                     for item in items:
                         if is_isbn_mode:
                             item_isbn = item.get('isbn', '')
@@ -284,8 +309,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                                 continue
 
                         all_items.append(item)
+                        kept_count += 1
+                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name} 필터 통과 {kept_count}/{len(items)}건")
+
+            print(f"[UnifiedBook] [3단계:API 병렬 호출] 전체 소스 합산 원본 아이템 {len(all_items)}건")
 
             if not all_items:
+                print("[UnifiedBook] [4단계:메타데이터 합성] 수집된 아이템이 없어 종료")
                 return []
 
             # 2) [메타데이터 합성 및 정렬] 같은 책을 가리키는 결과들을 그룹으로 묶고,
@@ -295,12 +325,17 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             cover_priority_order = [s for s in cover_priority_order if not (s in seen_src or seen_src.add(s))]
 
             groups = _group_items(all_items)
+            print(f"[UnifiedBook] [4단계:메타데이터 합성] {len(all_items)}건 -> {len(groups)}개 그룹으로 병합 "
+                  f"(표지 우선순위={cover_priority_order}, 서지 우선순위={INFO_PRIORITY})")
 
             res = []
-            for g in groups:
+            for g_idx, g in enumerate(groups):
+                sources_in_group = sorted({it.get('source') for it in g['items']})
                 merged = _merge_group(g["items"], cover_priority_order, INFO_PRIORITY)
                 if not merged.get("title"):
                     continue
+                print(f"[UnifiedBook] [4단계:메타데이터 합성] 그룹[{g_idx}] 제목={merged.get('title')!r} "
+                      f"참여소스={sources_in_group} -> 채택 소스 조합={merged.get('source')!r}")
 
                 formatted_date = format_date(merged.get('pubDate'))
                 isbn = merged.get('isbn', '')
@@ -333,13 +368,16 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             # 3) 정렬 우선순위: ISBN 매칭(이미 is_isbn_mode에서 전량 필터링됨) -> 책 제목 완전일치 순
             if not is_isbn_mode and norm_query:
                 res.sort(key=lambda it: 0 if norm_query == _normalize_title(re.sub(r'^\[.*?\]\s*', '', it.get('title', ''))) else 1)
+                print(f"[UnifiedBook] [4단계:메타데이터 합성] 제목 완전일치 우선 정렬 적용 (기준어={norm_query!r})")
 
+            print(f"[UnifiedBook] [4단계:메타데이터 합성] 최종 결과 {len(res)}건 반환")
             return res
 
         results = []
 
         # 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
         if is_isbn:
+            print(f"[UnifiedBook] [3단계 진입] ISBN 모드로 1차 검색 실행 (search_query={search_query}, 감지출처={detection_source})")
             sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
                 ('네이버', search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
@@ -351,6 +389,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         # 2차 백업 검색 (Fallback):
         # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원래 책 제목 검색으로 Fallback 전환
         if not results:
+            print(f"[UnifiedBook] [3단계 진입] 제목 모드로 {'2차(Fallback) ' if is_isbn else ''}검색 실행 (clean_query_base={clean_query_base!r})")
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
                 ('네이버', search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
@@ -359,16 +398,20 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             ]
             results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
 
+        print(f"[UnifiedBook] ===== 검색 종료 | 최종 반환 {len(results)}건 =====")
         return results
 
     def apply(self, db_type, book_id, item_data):
+        print(f"[UnifiedBook] [5단계:저장] apply 호출 | book_id={book_id!r} title={item_data.get('title')!r} source={item_data.get('source')!r}")
         if Image is None:
+            print("[UnifiedBook] [5단계:저장] Pillow(PIL) 미설치로 저장 중단")
             return False, "Pillow 라이브러리가 필요합니다."
 
         gateway = self.get_db_gateway(db_type)
         try:
             book = gateway.fetch_one("SELECT file_path, library_id FROM books WHERE id = ?", (book_id,))
             if not book:
+                print(f"[UnifiedBook] [5단계:저장] book_id={book_id} 에 해당하는 도서를 찾지 못함")
                 return False, "도서를 찾을 수 없습니다."
 
             file_path = get_row_val(book, 'file_path')
@@ -376,6 +419,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             cover_url, cover_filename = item_data.get('cover'), None
 
             if cover_url:
+                print(f"[UnifiedBook] [5단계:저장] 표지 다운로드 시작: {cover_url}")
                 try:
                     import os
                     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -390,7 +434,10 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         with Image.open(io.BytesIO(response.read())) as img:
                             img.save(dest_path, "WEBP", quality=95)
                     cover_filename = f"{library_id}/{cover_filename}"
-                except: cover_filename = None
+                    print(f"[UnifiedBook] [5단계:저장] 표지 저장 완료: {cover_filename}")
+                except Exception as e:
+                    print(f"[UnifiedBook] [5단계:저장] 표지 저장 실패: {e}")
+                    cover_filename = None
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
             pub_date_raw = item_data.get('pubDate', '')
@@ -434,8 +481,11 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                      item_data.get('link'), clean_pub_date, cover_filename, cover_filename, cover_filename, book_id)
                 )
 
+            print(f"[UnifiedBook] [5단계:저장] books 테이블 UPDATE 실행 (title={clean_title!r}, isbn컬럼존재={has_isbn_column})")
+
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
         except Exception as e:
+            print(f"[UnifiedBook] [5단계:저장] 저장 중 예외 발생: {e}")
             return False, f"적용 오류: {str(e)}"
 
     def get_context_menu_items(self, db_type, context):
