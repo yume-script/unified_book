@@ -220,21 +220,27 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
               f"{'(search_query=' + search_query + ')' if is_isbn else '(ISBN 아님, 2단계로 진행)'}")
 
         # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
-        if not is_isbn:
+        gateway = self.get_db_gateway(db_type)
+        book = None
+
+        if is_isbn:
+            # 입력값 자체가 ISBN인 경우에도, 제목/저자를 함께 쓰기 위해 DB에서 해당 ISBN 도서를 조회
+            book = gateway.fetch_one("SELECT file_path, title, author, isbn FROM books WHERE isbn = ? LIMIT 1", (clean_query,))
+            print(f"[UnifiedBook] [1단계:로컬 파싱] DB에서 동일 ISBN 도서 조회={'있음' if book else '없음'} (제목/저자 axis 보강용)")
+        else:
             print(f"[UnifiedBook] [2단계:DB/파일 파싱] clean_query_base={clean_query_base!r} 로 books 테이블 조회 시작")
-            gateway = self.get_db_gateway(db_type)
 
             # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
-            book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
+            book = gateway.fetch_one("SELECT file_path, title, author, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
             if not book:
-                book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
+                book = gateway.fetch_one("SELECT file_path, title, author, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
 
             # 유연한 부분일치 검색 추가 가동
             if not book:
                 words = [w for w in clean_query_base.split() if len(w) > 1]
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
-                    book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
+                    book = gateway.fetch_one("SELECT file_path, title, author, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
 
             print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 매칭 도서={'있음' if book else '없음'}")
 
@@ -266,64 +272,103 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             detection_source = method  # 감지출처: LOCAL 또는 AI
                             print(f"[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔으로 ISBN 추출 성공 (경로: {method}) -> {extracted_isbn}")
                         else:
-                            print("[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔에서도 ISBN을 찾지 못함 -> 3단계는 제목 검색으로 진행")
+                            print("[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔에서도 ISBN을 찾지 못함")
                     else:
                         print("[UnifiedBook] [2단계:DB/파일 파싱] ISBN_FILE_SCAN 옵션 꺼짐 -> 파일 스캔 건너뜀")
 
-        # 내부 검색 수행 전용 헬퍼 함수
-        def _execute_search(sources, s_query, is_isbn_mode):
-            mode_label = "ISBN" if is_isbn_mode else "제목"
-            requested = [name for name, _func, args in sources if name == '구글' or all(args)]
-            skipped = [name for name, _func, args in sources if name != '구글' and not all(args)]
-            print(f"[UnifiedBook] [3단계:API 병렬 호출 | {mode_label} 모드] s_query={s_query!r} "
-                  f"호출 소스={requested} (API키 없어 스킵={skipped or '없음'})")
+        # 검색 축(axis) 구성: ISBN이 있으면 [ISBN, 제목, 저자] 3개, 없으면 [제목, 저자] 2개
+        # (저자는 DB에 저장된 값이 있을 때만 axis로 추가됨)
+        title_query = (get_row_val(book, 'title') if book else '') or clean_query_base
+        author_query = ((get_row_val(book, 'author') if book else '') or '').strip()
 
-            # 1) 각 소스 API를 병렬 호출하여 원본 결과를 그대로 수집
-            all_items = []
-            futures = {}
-            with ThreadPoolExecutor(max_workers=len(sources)) as executor:
-                for source_name, func, args in sources:
+        axes = []
+        if is_isbn:
+            axes.append(('isbn', search_query))
+        axes.append(('title', title_query))
+        if author_query:
+            axes.append(('author', author_query))
+
+        print(f"[UnifiedBook] [3단계 진입] 검색 축={[a[0] for a in axes]} "
+              f"(ISBN={'있음' if is_isbn else '없음'}, 제목={title_query!r}, 저자={author_query or '없음'})")
+
+        # 소스별 (일반검색함수, ISBN전용검색함수) 정의
+        source_defs = {
+            '알라딘': {
+                'general': (search_aladin, (config.get("ALADIN_KEY"),)),
+                'isbn': (search_aladin_isbn, (config.get("ALADIN_KEY"),)),
+            },
+            '네이버': {
+                'general': (search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                'isbn': (search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+            },
+            '구글': {
+                'general': (search_google, (config.get("GOOGLE_API_KEY"),)),
+                'isbn': (search_google, (config.get("GOOGLE_API_KEY"),)),
+            },
+            '국립중앙도서관': {
+                'general': (search_nlk, (config.get("NLK_CERT_KEY"),)),
+                'isbn': (search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
+            },
+        }
+
+        # 내부 검색 수행 전용 헬퍼 함수: 여러 축(axis) x 여러 소스의 조합을 한 번에 병렬 호출하여 합성
+        def _execute_search(axes, has_isbn):
+            tasks = []
+            for axis_type, axis_query in axes:
+                if not axis_query:
+                    continue
+                for source_name, funcs in source_defs.items():
+                    func, args = funcs['isbn'] if axis_type == 'isbn' else funcs['general']
                     if source_name != '구글' and not all(args):
                         continue
-                    future = executor.submit(func, s_query, *args)
-                    futures[future] = source_name
+                    tasks.append((source_name, axis_type, func, args, axis_query))
+
+            requested_srcs = sorted({t[0] for t in tasks})
+            print(f"[UnifiedBook] [3단계:API 병렬 호출] 총 {len(tasks)}개 작업(소스x축 조합) 실행 예정 | 참여 소스={requested_srcs}")
+
+            all_items = []
+            futures = {}
+            with ThreadPoolExecutor(max_workers=max(len(tasks), 1)) as executor:
+                for source_name, axis_type, func, args, axis_query in tasks:
+                    future = executor.submit(func, axis_query, *args)
+                    futures[future] = (source_name, axis_type, axis_query)
 
                 for future in as_completed(futures):
-                    source_name = futures[future]
+                    source_name, axis_type, axis_query = futures[future]
                     try:
                         items = future.result()
                     except Exception as e:
-                        print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name} 호출 실패: {e}")
+                        print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}:{axis_query!r}) 호출 실패: {e}")
                         continue
 
-                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name} 원본 결과 {len(items)}건 수신")
+                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}:{axis_query!r}) 원본 결과 {len(items)}건 수신")
 
                     kept_count = 0
                     for item in items:
-                        if is_isbn_mode:
+                        if axis_type == 'isbn':
                             item_isbn = item.get('isbn', '')
-                            if not compare_isbns(s_query, item_isbn):
+                            if not compare_isbns(axis_query, item_isbn):
                                 continue
 
                         original_title = item.get('title', '')
                         if not original_title:
                             continue
-                        if not is_isbn_mode and strict_match and norm_query:
+                        if axis_type == 'title' and strict_match and norm_query:
                             if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
                                 continue
 
                         all_items.append(item)
                         kept_count += 1
-                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name} 필터 통과 {kept_count}/{len(items)}건")
+                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}) 필터 통과 {kept_count}/{len(items)}건")
 
-            print(f"[UnifiedBook] [3단계:API 병렬 호출] 전체 소스 합산 원본 아이템 {len(all_items)}건")
+            print(f"[UnifiedBook] [3단계:API 병렬 호출] 전체 소스x축 합산 원본 아이템 {len(all_items)}건")
 
             if not all_items:
                 print("[UnifiedBook] [4단계:메타데이터 합성] 수집된 아이템이 없어 종료")
                 return []
 
             # 2) [메타데이터 합성 및 정렬] 같은 책을 가리키는 결과들을 그룹으로 묶고,
-            #    표지는 (옵션에 따라) 알라딘 우선, 그 외 서지정보는 국립중앙도서관 > 알라딘 > 네이버 > 구글 순으로 합성
+            #    표지는 설정된 우선 소스, 그 외 서지정보는 국립중앙도서관 > 알라딘 > 네이버 > 구글 순으로 합성
             cover_priority_order = [cover_priority_source] + INFO_PRIORITY
             seen_src = set()
             cover_priority_order = [s for s in cover_priority_order if not (s in seen_src or seen_src.add(s))]
@@ -350,8 +395,11 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
                 label = merged.get('source', '') or "출처 미상"
                 original_title = merged.get('title', '')
+                item_isbn_clean = re.sub(r'[^0-9X]', '', str(isbn or '').upper())
+                is_isbn_match = has_isbn and item_isbn_clean and compare_isbns(search_query, item_isbn_clean)
+
                 # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
-                if is_isbn_mode:
+                if is_isbn_match:
                     if detection_source == "INPUT":
                         merged['title'] = f"[{label}/ISBN] {original_title} *"
                     elif detection_source == "DB":
@@ -366,41 +414,22 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     merged['title'] = f"[{label}] {original_title}"
 
                 merged['description'] = re.sub(r'^\[.*?\]\s*', '', merged.get('description', '')) if merged.get('description') else ''
+                merged['_isbn_match'] = is_isbn_match
                 merged.pop('_sources', None)
                 res.append(merged)
 
-            # 3) 정렬 우선순위: ISBN 매칭(이미 is_isbn_mode에서 전량 필터링됨) -> 책 제목 완전일치 순
-            if not is_isbn_mode and norm_query:
-                res.sort(key=lambda it: 0 if norm_query == _normalize_title(re.sub(r'^\[.*?\]\s*', '', it.get('title', ''))) else 1)
-                print(f"[UnifiedBook] [4단계:메타데이터 합성] 제목 완전일치 우선 정렬 적용 (기준어={norm_query!r})")
+            # 3) 정렬 우선순위: ISBN 일치 그룹 우선 -> 그다음 책 제목 완전일치 순
+            def _sort_key(it):
+                isbn_rank = 0 if it.pop('_isbn_match', False) else 1
+                title_rank = 0 if norm_query and norm_query == _normalize_title(re.sub(r'^\[.*?\]\s*', '', it.get('title', ''))) else 1
+                return (isbn_rank, title_rank)
+            res.sort(key=_sort_key)
+            print(f"[UnifiedBook] [4단계:메타데이터 합성] 정렬 적용 (ISBN 일치 우선 -> 제목 완전일치 우선, 기준어={norm_query!r})")
 
             print(f"[UnifiedBook] [4단계:메타데이터 합성] 최종 결과 {len(res)}건 반환")
             return res
 
-        results = []
-
-        # 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
-        if is_isbn:
-            print(f"[UnifiedBook] [3단계 진입] ISBN 모드로 1차 검색 실행 (search_query={search_query}, 감지출처={detection_source})")
-            sources_isbn = [
-                ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
-                ('네이버', search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-                ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
-                ('국립중앙도서관', search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
-            ]
-            results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
-
-        # 2차 백업 검색 (Fallback):
-        # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원래 책 제목 검색으로 Fallback 전환
-        if not results:
-            print(f"[UnifiedBook] [3단계 진입] 제목 모드로 {'2차(Fallback) ' if is_isbn else ''}검색 실행 (clean_query_base={clean_query_base!r})")
-            sources_title = [
-                ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
-                ('네이버', search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-                ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
-                ('국립중앙도서관', search_nlk, (config.get("NLK_CERT_KEY"),)),
-            ]
-            results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
+        results = _execute_search(axes, has_isbn=is_isbn)
 
         print(f"[UnifiedBook] ===== 검색 종료 | 최종 반환 {len(results)}건 =====")
         return results
