@@ -272,8 +272,20 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         # 검색 축(axis) 구성: ISBN이 있으면 [ISBN, 제목, 저자] 3개, 없으면 [제목, 저자] 2개
         # (저자는 DB에 저장된 값이 있을 때만 axis로 추가됨)
-        title_query = (get_row_val(book, 'title') if book else '') or clean_query_base
-        author_query = ((get_row_val(book, 'author') if book else '') or '').strip()
+        raw_db_title = get_row_val(book, 'title') if book else ''
+        raw_db_author = get_row_val(book, 'author') if book else ''
+
+        # DB의 title 컬럼에 파일명 유래 태그(예: "[유민주]")가 안 지워진 채 남아있을 수 있으므로,
+        # clean_query_base와 동일한 정제(대괄호/소괄호 제거)를 한 번 더 적용해서 검색 축을 보호한다.
+        def _strip_brackets(text):
+            cleaned = re.sub(r'\[.*?\]|\(.*?\)', '', text or '').strip()
+            return cleaned or (text or '')
+
+        title_query = _strip_brackets(raw_db_title) if raw_db_title else clean_query_base
+        author_query = _strip_brackets(raw_db_author).strip() if raw_db_author else ''
+
+        print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 원본 title={raw_db_title!r} author={raw_db_author!r} "
+              f"-> 정제 후 title_query={title_query!r} author_query={author_query!r}")
 
         axes = []
         if is_isbn:
