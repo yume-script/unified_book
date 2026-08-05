@@ -163,7 +163,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "enabled": True,
         "provider": "github-raw",
         "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/refs/heads/main/",
-        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "nlk.py", "utils_unified.py", "index.html", "style.css", "__init__.py", "VERSION"],
+        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "nlk.py", "utils_unified.py", "settings.html", "style.css", "__init__.py", "VERSION"],
         "version_file": "VERSION",
         "version_key": "plugin version",
         "show_sample_update_button": True,
@@ -177,7 +177,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
         {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
         {"key": "LITELLM_MODEL", "label": "LiteLLM 모델명 (선택)", "type": "text", "required": False},
-        {"key": "COVER_PRIORITY_ALADIN", "label": "표지 우선순위: 알라딘 데이터가 있으면 우선 사용", "type": "checkbox", "required": False},
+        {"key": "COVER_PRIORITY", "label": "표지(Cover) 우선 소스", "type": "select",
+         "options": ["알라딘", "네이버", "구글", "국립중앙도서관"], "default": "알라딘", "required": False},
         {"key": "STRICT_MATCH", "label": "검색 결과 엄격한 필터링", "type": "checkbox", "required": False},
         {"key": "ISBN_FILE_SCAN", "label": "도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도", "type": "checkbox", "required": False}
     ]
@@ -191,7 +192,10 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
-        cover_priority_aladin = parse_bool(config.get("COVER_PRIORITY_ALADIN", True), default=True)
+        # COVER_PRIORITY: settings.html의 select 값 ("알라딘"/"네이버"/"구글"/"국립중앙도서관")
+        cover_priority_source = (config.get("COVER_PRIORITY") or "알라딘").strip()
+        if cover_priority_source not in INFO_PRIORITY:
+            cover_priority_source = "알라딘"
         gemini_key = config.get("GEMINI_API_KEY", "").strip()
         llm_endpoint = config.get("LITELLM_ENDPOINT", "").strip()
         llm_model = config.get("LITELLM_MODEL", "").strip()
@@ -320,7 +324,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             # 2) [메타데이터 합성 및 정렬] 같은 책을 가리키는 결과들을 그룹으로 묶고,
             #    표지는 (옵션에 따라) 알라딘 우선, 그 외 서지정보는 국립중앙도서관 > 알라딘 > 네이버 > 구글 순으로 합성
-            cover_priority_order = (["알라딘"] if cover_priority_aladin else []) + INFO_PRIORITY
+            cover_priority_order = [cover_priority_source] + INFO_PRIORITY
             seen_src = set()
             cover_priority_order = [s for s in cover_priority_order if not (s in seen_src or seen_src.add(s))]
 

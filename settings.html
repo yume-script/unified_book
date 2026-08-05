@@ -1,6 +1,15 @@
 <div class="ubs-plugin-panel">
-  <div class="ubs-plugin-title">통합 도서 검색 설정 (Ver 1.6.3)</div>
-  <div class="ubs-plugin-desc">알라딘, 네이버, 구글의 도서 오픈 API 데이터를 동시에 조회하고, ISBN/제목 기준으로 하나의 도서 정보로 합성하여 채워 넣습니다.</div>
+  <div class="ubs-plugin-title">통합 도서 검색 설정 (Ver 1.4.1)</div>
+  <div class="ubs-plugin-desc">국립중앙도서관, 알라딘, 네이버, 구글의 도서 오픈 API 데이터를 동시에 조회하고, ISBN/제목 기준으로 하나의 도서 정보로 합성하여 채워 넣습니다.</div>
+
+  <!-- 국립중앙도서관 Seoji OpenAPI 설정 -->
+  <div class="ubs-plugin-field">
+    <label for="ubs-nlk-key">국립중앙도서관 Seoji 인증키</label>
+    <div class="ubs-input-container">
+      <input id="ubs-nlk-key" type="password" name="NLK_CERT_KEY" placeholder="국립중앙도서관 Seoji 인증키를 입력하세요 (선택)" />
+      <p class="hint">https://www.nl.go.kr/seoji/ 에서 무료로 발급받은 서지정보 유통지원시스템(Seoji) 인증키를 입력하세요. 서지정보(제목/저자/출판사/출간일 등) 병합 시 최우선으로 채택됩니다.</p>
+    </div>
+  </div>
 
   <!-- 알라딘 OpenAPI 설정 -->
   <div class="ubs-plugin-field">
@@ -69,6 +78,30 @@
           <p class="hint">LiteLLM 라우터에 요청을 보낼 때 적용할 모델 별칭을 적어줍니다. (비워둘 시 기본값: gemini/gemini-3.5-flash-lite)</p>
         </div>
       </div>
+
+      <!-- 검색 결과 필터링 옵션 -->
+      <div class="ubs-plugin-field">
+        <div class="ubs-label-spacer"></div>
+        <div class="ubs-input-container">
+          <label class="ubs-checkbox-label" for="ubs-strict-match">
+            <input id="ubs-strict-match" type="checkbox" name="STRICT_MATCH" value="true" />
+            <span>검색 결과 엄격한 필터링</span>
+          </label>
+          <p class="hint">체크 시, 검색어 단어 목록이 수집된 도서 제목 내에 실제로 정확하게 포함되어 있는 결과만 통과시킵니다.</p>
+        </div>
+      </div>
+
+      <!-- 파일 내부 ISBN 스캔 옵션 -->
+      <div class="ubs-plugin-field">
+        <div class="ubs-label-spacer"></div>
+        <div class="ubs-input-container">
+          <label class="ubs-checkbox-label" for="ubs-isbn-file-scan">
+            <input id="ubs-isbn-file-scan" type="checkbox" name="ISBN_FILE_SCAN" value="true" checked />
+            <span>도서 파일(EPUB/PDF) 내부에서 ISBN 검출 시도</span>
+          </label>
+          <p class="hint">체크 시, 검색창을 열었을 때 실제 도서의 표지 전후방 페이지를 열어 판권지 속 ISBN을 추적합니다. (저사양 컴퓨터는 해제를 권장합니다.)</p>
+        </div>
+      </div>
     </div>
   </details>
 
@@ -80,7 +113,9 @@
         <option value="알라딘">알라딘 우선</option>
         <option value="네이버">네이버 우선</option>
         <option value="구글">구글 우선</option>
+        <option value="국립중앙도서관">국립중앙도서관 우선</option>
       </select>
-      <p class="hint">여러 API에서 표지가 동시에 확보되었을 때, 우선적으로 사용할 표지 이미지의 출처를 선택합니다. 선택한 출처에 표지가 없으면 다른 출처의 표지로 자동 대체됩니다.</p>
+      <p class="hint">여러 API에서 표지가 동시에 확보되었을 때, 우선적으로 사용할 표지 이미지의 출처를 선택합니다. 선택한 출처에 표지가 없으면 다른 출처의 표지로 자동 대체됩니다. (서지정보는 이 설정과 무관하게 국립중앙도서관 &gt; 알라딘 &gt; 네이버 &gt; 구글 순으로 별도 병합됩니다.)</p>
     </div>
   </div>
+</div>
