@@ -84,12 +84,6 @@ def validate_isbn10(isbn):
     except ValueError:
         return False
 
-def is_valid_isbn(clean_isbn):
-    """정제된 문자열이 ISBN-13 혹은 ISBN-10 규격을 만족하는지 한 번에 검사"""
-    if not clean_isbn:
-        return False
-    return validate_isbn13(clean_isbn) or validate_isbn10(clean_isbn)
-
 def compare_isbns(isbn_a, isbn_b):
     """10자리와 13자리 ISBN의 형식을 정규화하여 상호 교차 대조"""
     clean_a = re.sub(r'[^0-9X]', '', str(isbn_a or '').upper())
@@ -108,71 +102,13 @@ def compare_isbns(isbn_a, isbn_b):
         
     return False
 
-def extract_isbn_from_text(text):
-    """DB의 link 컬럼 등 임의 문자열 속에 섞여있는 ISBN 패턴을 정규식으로 역추적"""
-    if not text:
-        return None
-    normalized = re.sub(r'[\u2012-\u2015\u00ad]', '-', str(text))
-    isbn_pat = re.compile(r'\b(?:97[89][-\s]?)?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,6}[-\s]?[\dX]\b')
-    isbn10_fallback = None
-    for match in isbn_pat.findall(normalized):
-        clean = re.sub(r'[^0-9X]', '', match.upper())
-        if validate_isbn13(clean):
-            return clean
-        if validate_isbn10(clean) and isbn10_fallback is None:
-            isbn10_fallback = clean
-    return isbn10_fallback
-
-def merge_book_sources(items_by_source, info_priority=('알라딘', '네이버', '구글'), cover_priority=None):
-    """여러 출처(알라딘/네이버/구글)에서 수집한 동일 도서 데이터를 하나의 완성된 서지정보로 합성
-
-    - info_priority: 서지 정보(제목/저자/출판사/날짜/소개/링크/ISBN) 필드별 우선순위 순서
-    - cover_priority: 표지 이미지 전용 우선순위 순서 (미지정 시 info_priority와 동일)
-    """
-    if cover_priority is None:
-        cover_priority = info_priority
-
-    merged = {}
-    contributing = []
-    fields = ['title', 'author', 'publisher', 'pubDate', 'description', 'link', 'isbn']
-
-    for source in info_priority:
-        item = items_by_source.get(source)
-        if not item:
-            continue
-        contributing.append(source)
-        for f in fields:
-            val = item.get(f)
-            if val and not merged.get(f):
-                merged[f] = val
-
-    for source in cover_priority:
-        item = items_by_source.get(source)
-        if item and item.get('cover'):
-            merged['cover'] = item['cover']
-            break
-
-    # info_priority에 없는(=우선순위 목록에 빠진) 소스라도 데이터가 있으면 기여자로 인정
-    for source, item in items_by_source.items():
-        if source not in contributing and item:
-            contributing.append(source)
-            for f in fields:
-                val = item.get(f)
-                if val and not merged.get(f):
-                    merged[f] = val
-
-    merged['source'] = "+".join(contributing) if contributing else ''
-    return merged, contributing
-
 def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
     """구글 Gemini API 및 LiteLLM(OpenAI 호환) 프록시를 모두 지원하는 통합 지능형 판독 엔진"""
     if not text.strip():
         return None
         
-    # gemini-3.5-flash-lite 모델을 활용해 속도 및 비용 최적화 (2026년 7월 21일 출시 모델)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
     
-    # 잡담을 배제하고 오직 규정된 스키마의 JSON 오브젝트만 반환하도록 기계적 설계
     prompt = (
         "다음 도서 판권지/본문 텍스트에서 ISBN 번호만 추출해줘.\n"
         "출력은 반드시 다른 미사여구 없이 JSON 형식으로만 해야 하며, 그 구조는 반드시 다음 스키마를 따라야 해:\n"
@@ -185,13 +121,12 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "responseMimeType": "application/json", # 구글 공식 JSON 모드 활성화로 수다스러운 답변 완전 차단
+            "responseMimeType": "application/json",
             "temperature": 0.1,
             "maxOutputTokens": 100
         }
     }
     
-    # 1. LiteLLM / OpenAI 호환 모드 연동
     if endpoint and endpoint.strip():
         url = endpoint.strip()
         target_model = model.strip() if model and model.strip() else "gemini/gemini-3.5-flash-lite"
@@ -202,7 +137,7 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.1,
-            "response_format": {"type": "json_object"}  # OpenAI JSON 모드 명시
+            "response_format": {"type": "json_object"}
         }
         
         headers = {'Content-Type': 'application/json'}
@@ -227,7 +162,6 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
         except Exception as e:
             print(f"[LiteLLM API 에러] 사유: {str(e)}", file=sys.stderr)
 
-    # 2. 순수 Google Gemini 공식 API 모드 연동
     else:
         if not api_key:
             return None
@@ -274,14 +208,12 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
             opf_content = epub.read(opf_path)
             opf_root = ET.fromstring(opf_content)
             
-            # 1단계: 표준 메타데이터 태그(<dc:identifier>)에서 ISBN 탐색
             for elem in opf_root.iter():
                 if elem.tag.endswith('identifier') and elem.text:
                     clean = re.sub(r'[^0-9X]', '', elem.text.upper())
                     if validate_isbn13(clean) or validate_isbn10(clean):
                         return clean, "LOCAL"
             
-            # 2단계 백업: 본문 XHTML 파일 분석 (앞쪽 8장 + 뒤쪽 8장 대역 확장 분석)
             manifest = {}
             for elem in opf_root.iter():
                 if elem.tag.endswith('item'):
@@ -297,7 +229,6 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                     if idref:
                         spine_item_ids.append(idref)
             
-            # 판권지가 앞쪽에 조판되었을 경우를 대비해 전방 8장, 후방 8장 대역 수집
             num_spines = len(spine_item_ids)
             target_spines = list(range(min(8, num_spines)))
             if num_spines > 8:
@@ -306,8 +237,6 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
             
             opf_dir = os.path.dirname(opf_path)
             
-            # [초고속 조기 종료 필터 1]: 만화책/스캔본 전용 EPUB 판별
-            # 앞쪽 3장의 텍스트 정보가 공백 제외 20자 미만인 경우 이미지 중심의 도서로 간주하고 즉시 조기 종료
             sample_epub_text = ""
             check_spines = target_spines[:3]
             for idx in check_spines:
@@ -324,13 +253,9 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                     except Exception:
                         pass
             if len(re.sub(r'\s', '', sample_epub_text)) < 20:
-                return None, None  # 이미지 전용책이므로 실시간 수색 종료
+                return None, None
             
-            # "ISBN"이라는 글자 바로 옆에 붙은 숫자를 최우선으로 신뢰 (광고/추천도서 페이지의 다른 책 ISBN 오인식 방지)
-            anchored_pat = re.compile(r'ISBN[^0-9]{0,12}([0-9][0-9\-\s]{8,20}[0-9Xx])', re.IGNORECASE)
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
-            anchored_candidates = []
-            blind_isbn13_candidates = []
             isbn10_candidates = []
             compiled_texts = []
             
@@ -351,29 +276,18 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                         if text_content.strip():
                             compiled_texts.append(text_content)
                         
-                        for raw_match in anchored_pat.findall(text_content):
-                            clean = re.sub(r'[^0-9X]', '', raw_match.upper())
-                            if validate_isbn13(clean) or validate_isbn10(clean):
-                                anchored_candidates.append(clean)
-                        
                         for match in isbn_pat.findall(text_content):
                             clean = re.sub(r'[^0-9X]', '', match.upper())
-                            if validate_isbn13(clean):
-                                blind_isbn13_candidates.append(clean)
+                            if validate_isbn13(clean) or validate_isbn10(clean):
+                                return clean, "LOCAL"
                             elif validate_isbn10(clean):
                                 isbn10_candidates.append(clean)
                     except Exception:
                         pass
-            
-            # 신뢰도 우선순위: ISBN 라벨 인접 매칭 > 블라인드 13자리 > 블라인드 10자리
-            if anchored_candidates:
-                return anchored_candidates[0], "LOCAL"
-            if blind_isbn13_candidates:
-                return blind_isbn13_candidates[0], "LOCAL"
+                        
             if isbn10_candidates:
                 return isbn10_candidates[0], "LOCAL"
                 
-            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 LLM 전송 판독
             if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
                 full_text = "\n".join(compiled_texts)[:12000]
                 llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
@@ -396,9 +310,6 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
             if num_pages == 0:
                 return None, None
                 
-            # 💡 [초고속 조기 종료 필터 2]: 스캔본(통 이미지) 전용 PDF 판별 전방 5p, 후방 5p 확장 감지
-            # 표지를 제외한 본문 초입부(1~5페이지)와 맨 뒷부분(끝에서 5페이지)에서 임시 텍스트 추출을 먼저 시도합니다.
-            # 전/후방 양쪽 구역 모두 글자 데이터가 아예 없는 경우에만 스캔본(통 이미지)으로 판정하고 즉시 스캔을 중단합니다.
             check_indices = list(range(1, min(6, num_pages)))
             if num_pages > 5:
                 check_indices.extend(list(range(max(5, num_pages - 5), num_pages)))
@@ -416,17 +327,14 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 except Exception:
                     pass
             if not sample_text.strip():
-                return None, None # 전후방 모두 글자가 전혀 긁히지 않는 스캔 도서이므로 실시간 수색 조기 종료
+                return None, None
                 
             pages_to_scan = list(range(min(30, num_pages)))
             if num_pages > 30:
                 pages_to_scan.extend(list(range(max(30, num_pages - 30), num_pages)))
                 
             pages_to_scan = sorted(list(set(pages_to_scan)))
-            anchored_pat = re.compile(r'ISBN[^0-9]{0,12}([0-9][0-9\-\s]{8,20}[0-9Xx])', re.IGNORECASE)
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
-            anchored_candidates = []
-            blind_isbn13_candidates = []
             isbn10_candidates = []
             compiled_texts = []
             
@@ -435,33 +343,21 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 if not text:
                     continue
                 
-                # PDF 특유의 인코딩 문제로 인한 유니코드 대시 기호를 표준 하이픈(-)으로 표준화
                 text = re.sub(r'[\u2012-\u2015\u00ad.]', '-', text)
                 
                 if text.strip():
                     compiled_texts.append(text)
                 
-                for raw_match in anchored_pat.findall(text):
-                    clean = re.sub(r'[^0-9X]', '', raw_match.upper())
-                    if validate_isbn13(clean) or validate_isbn10(clean):
-                        anchored_candidates.append(clean)
-                
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
                     if validate_isbn13(clean):
-                        blind_isbn13_candidates.append(clean)
+                        return clean, "LOCAL"
                     elif validate_isbn10(clean):
                         isbn10_candidates.append(clean)
-            
-            # 신뢰도 우선순위: ISBN 라벨 인접 매칭 > 블라인드 13자리 > 블라인드 10자리
-            if anchored_candidates:
-                return anchored_candidates[0], "LOCAL"
-            if blind_isbn13_candidates:
-                return blind_isbn13_candidates[0], "LOCAL"
+                        
             if isbn10_candidates:
                 return isbn10_candidates[0], "LOCAL"
                 
-            # 3단계 백업: 로컬 정규식 매칭 실패 시 수집된 텍스트 본문 LLM 전송 판독
             if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
                 full_text = "\n".join(compiled_texts)[:12000]
                 llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
