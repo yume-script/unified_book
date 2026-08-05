@@ -22,7 +22,7 @@ def search_aladin(query, ttbkey):
 def search_aladin_isbn(isbn, ttbkey):
     """알라딘 ISBN 일치 전용 검색 API"""
     url = "http://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
-    params = {'ttbkey': ttbkey, 'Query': isbn, 'QueryType': 'ISBN', 'MaxResults': 1, 'output': 'js', 'Version': '20131101'}
+    params = {'ttbkey': ttbkey, 'Query': isbn, 'QueryType': 'ISBN13', 'MaxResults': 1, 'output': 'js', 'Version': '20131101'}
     try:
         with urllib.request.urlopen(f"{url}?{urllib.parse.urlencode(params)}", timeout=7) as response:
             res = response.read().decode('utf-8')
