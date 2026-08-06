@@ -140,6 +140,30 @@ def _extract_isbn_from_link(link):
     return None
 
 
+def _contains_at_word_boundary(text, query):
+    """text 안에 query가 '단어 경계'에서 시작하는 부분 문자열로 존재하는지 검사한다.
+    한글은 띄어쓰기 없이 조사가 바로 붙는 경우가 많아 완전한 어절 경계 판정은 어렵지만,
+    최소한 검색어 시작 위치 바로 앞 글자가 한글 음절/영숫자로 곧장 이어지는 복합어의
+    중간이 아니어야 한다는 조건만 걸어도, 짧은 검색어가 완전히 무관한 단어 중간에
+    우연히 끼어드는 오매칭(예: '성의 과학'이 '불확정성의 과학을 열다' 중간에 걸리는 경우)을
+    대부분 걸러낼 수 있다."""
+    if not text or not query:
+        return False
+    start = 0
+    text_l = text.lower()
+    query_l = query.lower()
+    while True:
+        idx = text_l.find(query_l, start)
+        if idx == -1:
+            return False
+        if idx == 0:
+            return True
+        prev = text[idx - 1]
+        if not (('가' <= prev <= '힣') or prev.isalnum()):
+            return True
+        start = idx + 1
+
+
 def _isbn13_of(item):
     """item의 isbn을 정규화된 13자리로 변환(가능한 경우). 그룹핑 매칭용."""
     raw = re.sub(r"[^0-9X]", "", str(item.get("isbn") or "").upper())
@@ -300,28 +324,50 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
             # title 뿐 아니라 사용자가 직접 지정한 title_alias(표시용 별칭)도 함께 매칭하고,
             # 삭제 표시된 도서(is_deleted=1)는 매칭 대상에서 제외한다.
+            # 💡 매칭 정확도가 높은 순서대로 시도한다: 1) title/alias 완전일치 -> 2) title/alias
+            #    단어 부분일치 -> 3) 최후 수단으로 파일명(디렉토리 경로 제외) 부분일치.
+            #    예전에는 2)와 3) 순서가 뒤바뀌어 있었고, LIKE 부분일치가 단순 substring이라
+            #    "성의 과학" 같은 짧은 검색어가 완전히 무관한 책의 제목/파일명 중간
+            #    ("...불확정성의 과학을 열다...")에 우연히 걸리는 오매칭이 있었다.
+            #    이제 SQL LIKE로 후보만 넉넉히 추려온 뒤, 파이썬에서 _contains_at_word_boundary로
+            #    "단어 경계에서 시작하는 매칭"인지 재검증해서 최종 채택한다.
             book = gateway.fetch_one(
                 "SELECT file_path, title, author, isbn, title_alias, link FROM books "
                 "WHERE (title = ? OR title_alias = ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
                 (clean_query_base, clean_query_base)
             )
-            if not book:
-                book = gateway.fetch_one(
-                    "SELECT file_path, title, author, isbn, title_alias, link FROM books "
-                    "WHERE file_path LIKE ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
-                    (f"%{clean_query_base}%",)
-                )
 
-            # 유연한 부분일치 검색 추가 가동
             if not book:
                 words = [w for w in clean_query_base.split() if len(w) > 1]
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
-                    book = gateway.fetch_one(
+                    candidates = gateway.fetch_all(
                         "SELECT file_path, title, author, isbn, title_alias, link FROM books "
-                        "WHERE (title LIKE ? OR title_alias LIKE ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
+                        "WHERE (title LIKE ? OR title_alias LIKE ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 20",
                         (f"%{sub_query}%", f"%{sub_query}%")
-                    )
+                    ) or []
+                    for cand in candidates:
+                        cand_title = get_row_val(cand, 'title') or ''
+                        cand_alias = get_row_val(cand, 'title_alias') or ''
+                        if _contains_at_word_boundary(cand_title, sub_query) or _contains_at_word_boundary(cand_alias, sub_query):
+                            book = cand
+                            break
+
+            # 최후 수단: 그래도 못 찾았으면 파일명(디렉토리 경로는 제외하고 마지막 '/' 뒤쪽만)에서
+            # 단어 경계 부분일치를 시도한다. 디렉토리 경로까지 포함해서 매칭하면 폴더명에
+            # 우연히 검색어가 섞여 들어가는 오매칭이 생기기 쉬우므로, 후보를 넉넉히 가져온 뒤
+            # os.path.basename()으로 파일명만 뽑아 단어 경계 매칭을 확인한다.
+            if not book:
+                candidates = gateway.fetch_all(
+                    "SELECT file_path, title, author, isbn, title_alias, link FROM books "
+                    "WHERE COALESCE(is_deleted, 0) = 0 AND file_path LIKE ? LIMIT 20",
+                    (f"%{clean_query_base}%",)
+                ) or []
+                for cand in candidates:
+                    basename = os.path.basename(get_row_val(cand, 'file_path') or '')
+                    if _contains_at_word_boundary(basename, clean_query_base):
+                        book = cand
+                        break
 
             print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 매칭 도서={'있음' if book else '없음'}")
 
