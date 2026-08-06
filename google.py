@@ -38,7 +38,7 @@ def search_google(query, api_key, field=None):
             
             # 디버깅: 검색된 아이템 수 출력
             total_items = data.get('totalItems', 0)
-            print(f"[DEBUG] Total Items Found: {total_items}")
+            #print(f"[DEBUG] Total Items Found: {total_items}")
             
             results = []
             for i in data.get('items', []):
