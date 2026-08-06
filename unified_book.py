@@ -2,7 +2,6 @@
 import os
 import re
 import urllib.request
-import urllib.parse
 import hashlib
 import io
 import zipfile
@@ -31,7 +30,6 @@ def _import_local_module(module_name):
 # 임포트 안정성 확보 (패키지 로드 실패 시 경로 우회 동적 임포트 실행)
 try:
     from .aladin import search_aladin, search_aladin_isbn, search_aladin_author
-    from .naver import search_naver, search_naver_isbn, search_naver_author
     from .google import search_google
     from .nlk import search_nlk, search_nlk_isbn
     from .utils_unified import (
@@ -40,7 +38,6 @@ try:
     )
 except ImportError:
     _aladin_mod = _import_local_module("aladin")
-    _naver_mod = _import_local_module("naver")
     _google_mod = _import_local_module("google")
     _nlk_mod = _import_local_module("nlk")
     _utils_mod = _import_local_module("utils_unified")
@@ -48,9 +45,6 @@ except ImportError:
     search_aladin = _aladin_mod.search_aladin
     search_aladin_isbn = _aladin_mod.search_aladin_isbn
     search_aladin_author = _aladin_mod.search_aladin_author
-    search_naver = _naver_mod.search_naver
-    search_naver_isbn = _naver_mod.search_naver_isbn
-    search_naver_author = _naver_mod.search_naver_author
     search_google = _google_mod.search_google
     search_nlk = _nlk_mod.search_nlk
     search_nlk_isbn = _nlk_mod.search_nlk_isbn
@@ -67,7 +61,7 @@ except ImportError:
 
 
 # 서지정보(텍스트 필드) 및 표지 병합 우선순위: 알라딘 > 국립중앙도서관 > 네이버 > 구글
-INFO_PRIORITY = ["알라딘", "국립중앙도서관", "네이버", "구글"]
+INFO_PRIORITY = ["알라딘", "국립중앙도서관", "구글"]
 
 
 def _normalize_title(title):
@@ -207,7 +201,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "enabled": True,
         "provider": "github-raw",
         "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/refs/heads/main/",
-        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "nlk.py", "utils_unified.py", "settings.html", "style.css", "__init__.py", "VERSION"],
+        "files": ["unified_book.py", "aladin.py", "google.py", "nlk.py", "utils_unified.py", "settings.html", "style.css", "__init__.py", "VERSION"],
         "version_file": "VERSION",
         "version_key": "plugin version",
         "show_sample_update_button": True,
@@ -215,8 +209,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     config_schema = [
         {"key": "NLK_CERT_KEY", "label": "국립중앙도서관 Seoji 인증키", "type": "password", "required": False},
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
-        {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
-        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
         {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
@@ -404,11 +396,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 'title': (search_aladin, (config.get("ALADIN_KEY"),)),
                 'author': (search_aladin_author, (config.get("ALADIN_KEY"),)),
                 'isbn': (search_aladin_isbn, (config.get("ALADIN_KEY"),)),
-            },
-            '네이버': {
-                'title': (search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-                'author': (search_naver_author, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-                'isbn': (search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
             },
             '구글': {
                 'title': (search_google, (config.get("GOOGLE_API_KEY"), 'intitle')),
@@ -648,23 +635,3 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         except Exception as e:
             print(f"[UnifiedBook] [5단계:저장] 저장 중 예외 발생: {e}")
             return False, f"적용 오류: {str(e)}"
-
-    #def get_context_menu_items(self, db_type, context):
-    #    return [
-    #        {
-    #            'id': 'unified_search_link',
-    #            'label': '통합 검색 결과 열기',
-    #            'icon': 'fa-solid fa-magnifying-glass',
-    #        }
-    #    ]
-
-    #def run_context_menu_action(self, db_type, action_id, context):
-    #    if action_id == 'unified_search_link':
-    #        query = context.get('book_title')
-    #        url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
-    #        return {
-    #            'success': True, 
-    #            'message': '통합 검색 페이지를 엽니다.', 
-    #            'open_url': url
-    #        }
-    #    return {'success': False, 'error': '알 수 없는 액션입니다.'}
