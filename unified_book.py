@@ -86,6 +86,33 @@ def _title_similar(title_a, title_b, threshold=0.35):
     return SequenceMatcher(None, a, b).ratio() >= threshold
 
 
+def _clean_author_field(raw):
+    """국립중앙도서관/알라딘 등의 AUTHOR 필드는 '저자 : 홍길동 ; 옮긴이 : 김철수 ;' 처럼
+    역할 라벨 + 세미콜론(또는 콤마) 구분자로 오는 경우가 있어, 검색 axis에 그대로 넘기면
+    다른 소스에서 저자명으로 인식하지 못한다. 역할 라벨을 떼어내고 순수 이름만
+    콤마로 이어붙여 DB 저장 형식(예: '백현기,김영철')과 동일하게 정규화한다.
+    번역/삽화/감수 등 저자가 아닌 역할은 제외한다."""
+    if not raw:
+        return ''
+    exclude_roles = ('옮긴이', '역자', '번역', '그림', '삽화', '감수', '해설', '편집')
+    names = []
+    for part in re.split(r'[;,]', raw):
+        part = part.strip().rstrip(';').strip()
+        if not part:
+            continue
+        m = re.match(r'^([가-힣A-Za-z]+)\s*[:：]\s*(.+)$', part)
+        if m:
+            role, name = m.group(1).strip(), m.group(2).strip()
+            if role in exclude_roles:
+                continue
+        else:
+            name = part
+        name = name.strip()
+        if name and name not in names:
+            names.append(name)
+    return ','.join(names)
+
+
 def _isbn13_of(item):
     """item의 isbn을 정규화된 13자리로 변환(가능한 경우). 그룹핑 매칭용."""
     raw = re.sub(r"[^0-9X]", "", str(item.get("isbn") or "").upper())
@@ -301,7 +328,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             if nlk_hits and nlk_hits[0].get('title'):
                 canonical_title = nlk_hits[0].get('title', '')
-                canonical_author = nlk_hits[0].get('author', '')
+                canonical_author = _clean_author_field(nlk_hits[0].get('author', ''))
                 canonical_route = '국립중앙도서관'
                 print(f"[UnifiedBook] [2단계:정본 조회] 국립중앙도서관 ISBN 검출 성공 -> "
                       f"title={canonical_title!r} author={canonical_author!r}")
@@ -316,7 +343,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
                 if aladin_hits and aladin_hits[0].get('title'):
                     canonical_title = aladin_hits[0].get('title', '')
-                    canonical_author = aladin_hits[0].get('author', '')
+                    canonical_author = _clean_author_field(aladin_hits[0].get('author', ''))
                     canonical_route = '알라딘'
                     print(f"[UnifiedBook] [2단계:정본 조회] 알라딘 ISBN 검출 성공 -> "
                           f"title={canonical_title!r} author={canonical_author!r}")
@@ -341,7 +368,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             author_query = _strip_brackets(canonical_author).strip() if canonical_author else ''
         else:
             title_query = _strip_brackets(raw_db_title) if raw_db_title else clean_query_base
-            author_query = _strip_brackets(raw_db_author).strip() if raw_db_author else ''
+            author_query = _clean_author_field(_strip_brackets(raw_db_author)) if raw_db_author else ''
 
         print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 원본 title={raw_db_title!r} author={raw_db_author!r} "
               f"정본 출처={canonical_route or '없음'} -> 정제 후 title_query={title_query!r} author_query={author_query!r}")
