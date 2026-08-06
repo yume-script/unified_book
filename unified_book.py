@@ -215,8 +215,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     config_schema = [
         {"key": "NLK_CERT_KEY", "label": "국립중앙도서관 Seoji 인증키", "type": "password", "required": False},
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
-        #{"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
-        #{"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
+        {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
+        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
         {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
@@ -240,7 +240,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         # 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
         clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
-        clean_query_base = re.sub(r'\[.*?\]|\(.*?\)', '', clean_query_base).strip()
+        clean_query_base = re.sub(r'\[.*?\]|\(.*?\)', '', clean_query_base)
+        clean_query_base = re.sub(r'#\d+', '', clean_query_base)
+        clean_query_base = re.sub(r'\s{2,}', ' ', clean_query_base).strip()
         if not clean_query_base:
             clean_query_base = query
 
@@ -357,10 +359,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         raw_db_title = get_row_val(book, 'title') if book else ''
         raw_db_author = get_row_val(book, 'author') if book else ''
 
-        # DB의 title 컬럼에 파일명 유래 태그(예: "[유민주]")가 안 지워진 채 남아있을 수 있으므로,
-        # clean_query_base와 동일한 정제(대괄호/소괄호 제거)를 한 번 더 적용해서 검색 축을 보호한다.
+        # DB의 title 컬럼에 파일명 유래 태그(예: "[유민주]", "#353")가 안 지워진 채 남아있을 수 있으므로,
+        # clean_query_base와 동일한 정제(대괄호/소괄호 제거) + 일련번호 태그(#숫자) 제거를 한 번 더 적용해서
+        # 검색 축을 보호한다. (예: "오늘부터 여행작가 [박동식]#353" -> "오늘부터 여행작가")
         def _strip_brackets(text):
-            cleaned = re.sub(r'\[.*?\]|\(.*?\)', '', text or '').strip()
+            cleaned = re.sub(r'\[.*?\]|\(.*?\)', '', text or '')
+            cleaned = re.sub(r'#\d+', '', cleaned)
+            cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
             return cleaned or (text or '')
 
         # 정본 제목/저자(국립중앙도서관 또는 알라딘 ISBN 조회 결과)가 있으면 최우선으로 사용하고,
@@ -400,11 +405,11 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 'author': (search_aladin_author, (config.get("ALADIN_KEY"),)),
                 'isbn': (search_aladin_isbn, (config.get("ALADIN_KEY"),)),
             },
-            #'네이버': {
-            #    'title': (search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-            #    'author': (search_naver_author, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-            #    'isbn': (search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-            #},
+            '네이버': {
+                'title': (search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                'author': (search_naver_author, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                'isbn': (search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+            },
             '구글': {
                 'title': (search_google, (config.get("GOOGLE_API_KEY"), 'intitle')),
                 'author': (search_google, (config.get("GOOGLE_API_KEY"), 'inauthor')),
@@ -455,6 +460,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}:{axis_query!r}) 원본 결과 {len(items)}건 수신")
 
                     kept_count = 0
+                    skipped_author_titles = []
                     for item in items:
                         if axis_type == 'isbn':
                             item_isbn = item.get('isbn', '')
@@ -473,11 +479,17 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         # 너무 동떨어진 제목은 결과에서 제외한다.
                         if axis_type == 'author' and title_query:
                             if not _title_similar(original_title, title_query):
+                                if len(skipped_author_titles) < 8:
+                                    skipped_author_titles.append(original_title)
                                 continue
 
                         all_items.append(item)
                         kept_count += 1
-                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}) 필터 통과 {kept_count}/{len(items)}건")
+
+                    skip_note = ""
+                    if skipped_author_titles:
+                        skip_note = f" | 저자축 유사도 필터로 제외된 제목 예시={skipped_author_titles}"
+                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}) 필터 통과 {kept_count}/{len(items)}건{skip_note}")
 
             print(f"[UnifiedBook] [3단계:API 병렬 호출] 전체 소스x축 합산 원본 아이템 {len(all_items)}건")
 
@@ -637,22 +649,22 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             print(f"[UnifiedBook] [5단계:저장] 저장 중 예외 발생: {e}")
             return False, f"적용 오류: {str(e)}"
 
-    #def get_context_menu_items(self, db_type, context):
-    #    return [
-    #        {
-    #            'id': 'unified_search_link',
-    #            'label': '통합 검색 결과 열기',
-    #            'icon': 'fa-solid fa-magnifying-glass',
-    #        }
-    #    ]
+    def get_context_menu_items(self, db_type, context):
+        return [
+            {
+                'id': 'unified_search_link',
+                'label': '통합 검색 결과 열기',
+                'icon': 'fa-solid fa-magnifying-glass',
+            }
+        ]
 
-    #def run_context_menu_action(self, db_type, action_id, context):
-    #    if action_id == 'unified_search_link':
-    #        query = context.get('book_title')
-    #        url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
-    #        return {
-    #            'success': True, 
-    #            'message': '통합 검색 페이지를 엽니다.', 
-    #            'open_url': url
-    #        }
-    #    return {'success': False, 'error': '알 수 없는 액션입니다.'}
+    def run_context_menu_action(self, db_type, action_id, context):
+        if action_id == 'unified_search_link':
+            query = context.get('book_title')
+            url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
+            return {
+                'success': True, 
+                'message': '통합 검색 페이지를 엽니다.', 
+                'open_url': url
+            }
+        return {'success': False, 'error': '알 수 없는 액션입니다.'}
