@@ -14,9 +14,17 @@ def extract_isbn(volume_info):
                 break
     return isbn
 
-def search_google(query, api_key):
-    """구글 도서 API 검색 (일반 및 ISBN 인덱스 병행 매칭)"""
-    params = {'q': query, 'maxResults': 10, 'langRestrict': 'ko'}
+def search_google(query, api_key, field=None):
+    """구글 도서 API 검색 (일반 및 필드 한정 검색 병행 지원).
+
+    💡 이전에는 title/author/isbn 축 모두 field 없이 'q=검색어'로만 질의해서,
+    저자명으로 검색해도 구글이 이를 저자 필드로 한정하지 못해 정확도가 떨어졌다.
+    field에 Google Books 쿼리 연산자를 지정하면 'inauthor:홍길동'처럼 필드를 한정해 검색한다.
+
+    field: None(자유검색, 기본값) | 'intitle'(제목) | 'inauthor'(저자) | 'isbn'
+    """
+    q_value = f"{field}:{query}" if field and query else query
+    params = {'q': q_value, 'maxResults': 10, 'langRestrict': 'ko'}
     if api_key: params['key'] = api_key
     url = f"https://www.googleapis.com/books/v1/volumes?{urllib.parse.urlencode(params)}"
     try:

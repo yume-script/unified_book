@@ -30,8 +30,8 @@ def _import_local_module(module_name):
 
 # 임포트 안정성 확보 (패키지 로드 실패 시 경로 우회 동적 임포트 실행)
 try:
-    from .aladin import search_aladin, search_aladin_isbn
-    from .naver import search_naver, search_naver_isbn
+    from .aladin import search_aladin, search_aladin_isbn, search_aladin_author
+    from .naver import search_naver, search_naver_isbn, search_naver_author
     from .google import search_google
     from .nlk import search_nlk, search_nlk_isbn
     from .utils_unified import (
@@ -47,8 +47,10 @@ except ImportError:
 
     search_aladin = _aladin_mod.search_aladin
     search_aladin_isbn = _aladin_mod.search_aladin_isbn
+    search_aladin_author = _aladin_mod.search_aladin_author
     search_naver = _naver_mod.search_naver
     search_naver_isbn = _naver_mod.search_naver_isbn
+    search_naver_author = _naver_mod.search_naver_author
     search_google = _google_mod.search_google
     search_nlk = _nlk_mod.search_nlk
     search_nlk_isbn = _nlk_mod.search_nlk_isbn
@@ -373,32 +375,46 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 원본 title={raw_db_title!r} author={raw_db_author!r} "
               f"정본 출처={canonical_route or '없음'} -> 정제 후 title_query={title_query!r} author_query={author_query!r}")
 
+        # 저자가 여러 명(콤마로 구분)인 경우, 하나의 문자열로 합쳐서 검색하면
+        # 각 소스 API가 "백현기,김영철" 자체를 저자명으로 인식해 매칭에 실패하므로,
+        # 저자 1명당 별도의 author axis를 만들어 각각 검색한다.
+        author_names = [a.strip() for a in author_query.split(',') if a.strip()] if author_query else []
+
         axes = []
         if is_isbn:
             axes.append(('isbn', search_query))
         axes.append(('title', title_query))
-        if author_query:
-            axes.append(('author', author_query))
+        for name in author_names:
+            axes.append(('author', name))
 
         print(f"[UnifiedBook] [3단계 진입] 검색 축={[a[0] for a in axes]} "
-              f"(ISBN={'있음' if is_isbn else '없음'}, 제목={title_query!r}, 저자={author_query or '없음'})")
+              f"(ISBN={'있음' if is_isbn else '없음'}, 제목={title_query!r}, 저자={author_names or '없음'})")
 
-        # 소스별 (일반검색함수, ISBN전용검색함수) 정의
+        # 소스별 (제목검색함수, 저자검색함수, ISBN전용검색함수) 정의
+        # 💡 예전에는 title/author 축이 둘 다 'general'(=제목검색) 함수를 공유해서,
+        #    저자 축 검색조차 저자명을 "제목"으로 검색하는 바람에 결과가 안 나오는 버그가 있었다.
+        #    소스별로 title/author/isbn 세 갈래를 명확히 분리해서 각 API의 저자 전용 파라미터를 사용한다.
         source_defs = {
             '알라딘': {
-                'general': (search_aladin, (config.get("ALADIN_KEY"),)),
+                'title': (search_aladin, (config.get("ALADIN_KEY"),)),
+                'author': (search_aladin_author, (config.get("ALADIN_KEY"),)),
                 'isbn': (search_aladin_isbn, (config.get("ALADIN_KEY"),)),
             },
             '네이버': {
-                'general': (search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                'title': (search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                'author': (search_naver_author, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
                 'isbn': (search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
             },
             '구글': {
-                'general': (search_google, (config.get("GOOGLE_API_KEY"),)),
-                'isbn': (search_google, (config.get("GOOGLE_API_KEY"),)),
+                'title': (search_google, (config.get("GOOGLE_API_KEY"), 'intitle')),
+                'author': (search_google, (config.get("GOOGLE_API_KEY"), 'inauthor')),
+                'isbn': (search_google, (config.get("GOOGLE_API_KEY"), 'isbn')),
             },
             '국립중앙도서관': {
-                'general': (search_nlk, (config.get("NLK_CERT_KEY"),)),
+                # search_nlk는 title로 먼저 시도하고 결과가 없으면 자동으로 author로 재시도하므로
+                # author 축에 그대로 써도 저자명 검색이 정상 동작한다.
+                'title': (search_nlk, (config.get("NLK_CERT_KEY"),)),
+                'author': (search_nlk, (config.get("NLK_CERT_KEY"),)),
                 'isbn': (search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
             },
         }
@@ -410,7 +426,10 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 if not axis_query:
                     continue
                 for source_name, funcs in source_defs.items():
-                    func, args = funcs['isbn'] if axis_type == 'isbn' else funcs['general']
+                    routed = funcs.get(axis_type)
+                    if routed is None:
+                        continue
+                    func, args = routed
                     if source_name != '구글' and not all(args):
                         continue
                     tasks.append((source_name, axis_type, func, args, axis_query))
