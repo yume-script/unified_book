@@ -10,6 +10,7 @@ import json
 import html
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
 try:
     from PIL import Image
 except ImportError:
@@ -69,6 +70,20 @@ INFO_PRIORITY = ["알라딘", "국립중앙도서관", "네이버", "구글"]
 
 def _normalize_title(title):
     return "".join(re.findall(r"\w+", title or "")).lower()
+
+
+def _title_similar(title_a, title_b, threshold=0.35):
+    """저자 축(author axis) 검색 결과 필터링용: 두 제목이 같은 책일 가능성이 있을 만큼
+    비슷한지 판단한다. 한쪽 제목이 다른쪽에 포함되거나(부제/부분 표제 차이 등),
+    문자 단위 유사도가 threshold 이상이면 True. 저자는 같지만 제목이 전혀 다른
+    '동명 저자의 다른 책'을 걸러내기 위한 용도."""
+    a = _normalize_title(title_a)
+    b = _normalize_title(title_b)
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= threshold
 
 
 def _isbn13_of(item):
@@ -270,8 +285,46 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     else:
                         print("[UnifiedBook] [2단계:DB/파일 파싱] ISBN_FILE_SCAN 옵션 꺼짐 -> 파일 스캔 건너뜀")
 
+        # ISBN이 확정된 경우, 국립중앙도서관 -> 알라딘 순으로 ISBN 정밀 조회를 선행하여
+        # 이후 제목/저자 축(axis) 검색에 사용할 "정본" 제목/저자를 확보한다.
+        # - 국립중앙도서관에서 ISBN이 검출되면 그 결과의 제목/저자를 정본으로 사용
+        # - 국립중앙도서관에서 못 찾으면 알라딘의 ISBN 검색 결과의 제목/저자로 대체
+        # - 둘 다 못 찾으면 기존처럼 DB의 title/author를 사용 (아래에서 폴백 처리)
+        canonical_title, canonical_author, canonical_route = '', '', None
+        if is_isbn:
+            nlk_key = config.get("NLK_CERT_KEY")
+            try:
+                nlk_hits = search_nlk_isbn(search_query, nlk_key) if nlk_key else []
+            except Exception as e:
+                print(f"[UnifiedBook] [2단계:정본 조회] 국립중앙도서관 ISBN 조회 실패: {e}")
+                nlk_hits = []
+
+            if nlk_hits and nlk_hits[0].get('title'):
+                canonical_title = nlk_hits[0].get('title', '')
+                canonical_author = nlk_hits[0].get('author', '')
+                canonical_route = '국립중앙도서관'
+                print(f"[UnifiedBook] [2단계:정본 조회] 국립중앙도서관 ISBN 검출 성공 -> "
+                      f"title={canonical_title!r} author={canonical_author!r}")
+            else:
+                print("[UnifiedBook] [2단계:정본 조회] 국립중앙도서관 ISBN 미검출 -> 알라딘 ISBN 조회로 폴백")
+                aladin_key = config.get("ALADIN_KEY")
+                try:
+                    aladin_hits = search_aladin_isbn(search_query, aladin_key) if aladin_key else []
+                except Exception as e:
+                    print(f"[UnifiedBook] [2단계:정본 조회] 알라딘 ISBN 조회 실패: {e}")
+                    aladin_hits = []
+
+                if aladin_hits and aladin_hits[0].get('title'):
+                    canonical_title = aladin_hits[0].get('title', '')
+                    canonical_author = aladin_hits[0].get('author', '')
+                    canonical_route = '알라딘'
+                    print(f"[UnifiedBook] [2단계:정본 조회] 알라딘 ISBN 검출 성공 -> "
+                          f"title={canonical_title!r} author={canonical_author!r}")
+                else:
+                    print("[UnifiedBook] [2단계:정본 조회] 알라딘 ISBN도 미검출 -> DB/파일 기반 제목·저자 사용")
+
         # 검색 축(axis) 구성: ISBN이 있으면 [ISBN, 제목, 저자] 3개, 없으면 [제목, 저자] 2개
-        # (저자는 DB에 저장된 값이 있을 때만 axis로 추가됨)
+        # (저자는 DB/정본 조회에서 값이 있을 때만 axis로 추가됨)
         raw_db_title = get_row_val(book, 'title') if book else ''
         raw_db_author = get_row_val(book, 'author') if book else ''
 
@@ -281,11 +334,17 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             cleaned = re.sub(r'\[.*?\]|\(.*?\)', '', text or '').strip()
             return cleaned or (text or '')
 
-        title_query = _strip_brackets(raw_db_title) if raw_db_title else clean_query_base
-        author_query = _strip_brackets(raw_db_author).strip() if raw_db_author else ''
+        # 정본 제목/저자(국립중앙도서관 또는 알라딘 ISBN 조회 결과)가 있으면 최우선으로 사용하고,
+        # 없으면 기존처럼 DB에 저장된 title/author를 사용한다.
+        if canonical_title:
+            title_query = _strip_brackets(canonical_title)
+            author_query = _strip_brackets(canonical_author).strip() if canonical_author else ''
+        else:
+            title_query = _strip_brackets(raw_db_title) if raw_db_title else clean_query_base
+            author_query = _strip_brackets(raw_db_author).strip() if raw_db_author else ''
 
         print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 원본 title={raw_db_title!r} author={raw_db_author!r} "
-              f"-> 정제 후 title_query={title_query!r} author_query={author_query!r}")
+              f"정본 출처={canonical_route or '없음'} -> 정제 후 title_query={title_query!r} author_query={author_query!r}")
 
         axes = []
         if is_isbn:
@@ -361,6 +420,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             continue
                         if axis_type == 'title' and strict_match and norm_query:
                             if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
+                                continue
+
+                        # 저자 축(author axis)으로 찾은 결과는 저자만 같고 책 제목은 전혀 다른
+                        # "동명 저자의 다른 책"이 섞여 들어오기 쉬우므로, 찾고 있는 책 제목과
+                        # 너무 동떨어진 제목은 결과에서 제외한다.
+                        if axis_type == 'author' and title_query:
+                            if not _title_similar(original_title, title_query):
                                 continue
 
                         all_items.append(item)
