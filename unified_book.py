@@ -5,6 +5,7 @@ import urllib.request
 import urllib.parse
 import hashlib
 import io
+import sys
 import zipfile
 import json
 import html
