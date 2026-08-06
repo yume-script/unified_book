@@ -215,8 +215,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     config_schema = [
         {"key": "NLK_CERT_KEY", "label": "국립중앙도서관 Seoji 인증키", "type": "password", "required": False},
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
-        {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
-        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
+        #{"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
+        #{"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
         {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
@@ -400,11 +400,11 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 'author': (search_aladin_author, (config.get("ALADIN_KEY"),)),
                 'isbn': (search_aladin_isbn, (config.get("ALADIN_KEY"),)),
             },
-            '네이버': {
-                'title': (search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-                'author': (search_naver_author, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-                'isbn': (search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
-            },
+            #'네이버': {
+            #    'title': (search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+            #    'author': (search_naver_author, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+            #    'isbn': (search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+            #},
             '구글': {
                 'title': (search_google, (config.get("GOOGLE_API_KEY"), 'intitle')),
                 'author': (search_google, (config.get("GOOGLE_API_KEY"), 'inauthor')),
@@ -637,22 +637,22 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             print(f"[UnifiedBook] [5단계:저장] 저장 중 예외 발생: {e}")
             return False, f"적용 오류: {str(e)}"
 
-    def get_context_menu_items(self, db_type, context):
-        return [
-            {
-                'id': 'unified_search_link',
-                'label': '통합 검색 결과 열기',
-                'icon': 'fa-solid fa-magnifying-glass',
-            }
-        ]
+    #def get_context_menu_items(self, db_type, context):
+    #    return [
+    #        {
+    #            'id': 'unified_search_link',
+    #            'label': '통합 검색 결과 열기',
+    #            'icon': 'fa-solid fa-magnifying-glass',
+    #        }
+    #    ]
 
-    def run_context_menu_action(self, db_type, action_id, context):
-        if action_id == 'unified_search_link':
-            query = context.get('book_title')
-            url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
-            return {
-                'success': True, 
-                'message': '통합 검색 페이지를 엽니다.', 
-                'open_url': url
-            }
-        return {'success': False, 'error': '알 수 없는 액션입니다.'}
+    #def run_context_menu_action(self, db_type, action_id, context):
+    #    if action_id == 'unified_search_link':
+    #        query = context.get('book_title')
+    #        url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
+    #        return {
+    #            'success': True, 
+    #            'message': '통합 검색 페이지를 엽니다.', 
+    #            'open_url': url
+    #        }
+    #    return {'success': False, 'error': '알 수 없는 액션입니다.'}
