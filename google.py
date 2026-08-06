@@ -15,21 +15,31 @@ def extract_isbn(volume_info):
     return isbn
 
 def search_google(query, api_key, field=None):
-    """구글 도서 API 검색 (일반 및 필드 한정 검색 병행 지원).
-
-    💡 이전에는 title/author/isbn 축 모두 field 없이 'q=검색어'로만 질의해서,
-    저자명으로 검색해도 구글이 이를 저자 필드로 한정하지 못해 정확도가 떨어졌다.
-    field에 Google Books 쿼리 연산자를 지정하면 'inauthor:홍길동'처럼 필드를 한정해 검색한다.
-
-    field: None(자유검색, 기본값) | 'intitle'(제목) | 'inauthor'(저자) | 'isbn'
-    """
+    """구글 도서 API 검색 (디버깅 및 접근성 강화 버전)"""
+    
+    # 쿼리 구성
     q_value = f"{field}:{query}" if field and query else query
-    params = {'q': q_value, 'maxResults': 10, 'langRestrict': 'ko'}
-    if api_key: params['key'] = api_key
+    params = {'q': q_value, 'maxResults': 10}
+    if api_key: 
+        params['key'] = api_key
+    
     url = f"https://www.googleapis.com/books/v1/volumes?{urllib.parse.urlencode(params)}"
+    
+    # 디버깅: URL 출력
+    print(f"[DEBUG] Request URL: {url}")
+    
+    # 브라우저인 것처럼 헤더 설정 (차단 방지)
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    req = urllib.request.Request(url, headers=headers)
+    
     try:
-        with urllib.request.urlopen(url, timeout=7) as response:
+        with urllib.request.urlopen(req, timeout=7) as response:
             data = json.loads(response.read().decode('utf-8'))
+            
+            # 디버깅: 검색된 아이템 수 출력
+            total_items = data.get('totalItems', 0)
+            print(f"[DEBUG] Total Items Found: {total_items}")
+            
             results = []
             for i in data.get('items', []):
                 vol = i.get('volumeInfo', {})
@@ -45,4 +55,6 @@ def search_google(query, api_key, field=None):
                     'isbn': extract_isbn(vol)
                 })
             return results
-    except: return []
+    except Exception as e:
+        print(f"[DEBUG] Error occurred: {e}")
+        return []
