@@ -26,7 +26,7 @@ def search_google(query, api_key, field=None):
     url = f"https://www.googleapis.com/books/v1/volumes?{urllib.parse.urlencode(params)}"
     
     # 디버깅: URL 출력
-    print(f"[DEBUG] Request URL: {url}")
+    #print(f"[DEBUG] Request URL: {url}")
     
     # 브라우저인 것처럼 헤더 설정 (차단 방지)
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
