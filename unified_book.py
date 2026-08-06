@@ -60,7 +60,7 @@ except ImportError:
     parse_bool = _utils_mod.parse_bool
 
 
-# 서지정보(텍스트 필드) 및 표지 병합 우선순위: 알라딘 > 국립중앙도서관 > 네이버 > 구글
+# 서지정보(텍스트 필드) 및 표지 병합 우선순위: 알라딘 > 국립중앙도서관 > 구글
 INFO_PRIORITY = ["알라딘", "국립중앙도서관", "구글"]
 
 
@@ -172,7 +172,7 @@ def _merge_group(items, cover_priority_order, info_priority_order):
     """한 그룹(동일 도서로 판정된 여러 소스 결과)을 우선순위에 따라 하나로 합성.
     - 표지(cover): cover_priority_order (옵션에 따라 알라딘 최우선)
     - 그 외 서지정보(title/author/publisher/pubDate/isbn/description/link): info_priority_order
-      (국립중앙도서관 > 알라딘 > 네이버 > 구글)
+      (국립중앙도서관 > 알라딘 > > 구글)
     """
     merged = {}
     for field in ("title", "author", "publisher", "pubDate", "isbn", "description", "link"):
@@ -485,7 +485,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 return []
 
             # 2) [메타데이터 합성 및 정렬] 같은 책을 가리키는 결과들을 그룹으로 묶고,
-            #    표지/서지정보 모두 알라딘 > 국립중앙도서관 > 네이버 > 구글 순으로 합성
+            #    표지/서지정보 모두 알라딘 > 국립중앙도서관 > 구글 순으로 합성
             cover_priority_order = INFO_PRIORITY
 
             groups = _group_items(all_items)
