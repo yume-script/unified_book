@@ -60,7 +60,7 @@ except ImportError:
     parse_bool = _utils_mod.parse_bool
 
 
-# 서지정보(텍스트 필드) 및 표지 병합 우선순위: 알라딘 > 국립중앙도서관 > 구글
+# 서지정보(텍스트 필드) 및 표지 병합 우선순위: 알라딘 > 국립중앙도서관 > 네이버 > 구글
 INFO_PRIORITY = ["알라딘", "국립중앙도서관", "구글"]
 
 
@@ -172,7 +172,7 @@ def _merge_group(items, cover_priority_order, info_priority_order):
     """한 그룹(동일 도서로 판정된 여러 소스 결과)을 우선순위에 따라 하나로 합성.
     - 표지(cover): cover_priority_order (옵션에 따라 알라딘 최우선)
     - 그 외 서지정보(title/author/publisher/pubDate/isbn/description/link): info_priority_order
-      (국립중앙도서관 > 알라딘 > > 구글)
+      (국립중앙도서관 > 알라딘 > 네이버 > 구글)
     """
     merged = {}
     for field in ("title", "author", "publisher", "pubDate", "isbn", "description", "link"):
@@ -257,22 +257,40 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         if is_isbn:
             # 입력값 자체가 ISBN인 경우에도, 제목/저자를 함께 쓰기 위해 DB에서 해당 ISBN 도서를 조회
-            book = gateway.fetch_one("SELECT file_path, title, author, isbn FROM books WHERE isbn = ? LIMIT 1", (clean_query,))
+            # (삭제 표시된 도서는 매칭 대상에서 제외)
+            book = gateway.fetch_one(
+                "SELECT file_path, title, author, isbn, title_alias FROM books WHERE isbn = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
+                (clean_query,)
+            )
             print(f"[UnifiedBook] [1단계:로컬 파싱] DB에서 동일 ISBN 도서 조회={'있음' if book else '없음'} (제목/저자 axis 보강용)")
         else:
             print(f"[UnifiedBook] [2단계:DB/파일 파싱] clean_query_base={clean_query_base!r} 로 books 테이블 조회 시작")
 
             # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
-            book = gateway.fetch_one("SELECT file_path, title, author, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
+            # title 뿐 아니라 사용자가 직접 지정한 title_alias(표시용 별칭)도 함께 매칭하고,
+            # 삭제 표시된 도서(is_deleted=1)는 매칭 대상에서 제외한다.
+            book = gateway.fetch_one(
+                "SELECT file_path, title, author, isbn, title_alias FROM books "
+                "WHERE (title = ? OR title_alias = ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
+                (clean_query_base, clean_query_base)
+            )
             if not book:
-                book = gateway.fetch_one("SELECT file_path, title, author, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
+                book = gateway.fetch_one(
+                    "SELECT file_path, title, author, isbn, title_alias FROM books "
+                    "WHERE file_path LIKE ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
+                    (f"%{clean_query_base}%",)
+                )
 
             # 유연한 부분일치 검색 추가 가동
             if not book:
                 words = [w for w in clean_query_base.split() if len(w) > 1]
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
-                    book = gateway.fetch_one("SELECT file_path, title, author, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
+                    book = gateway.fetch_one(
+                        "SELECT file_path, title, author, isbn, title_alias FROM books "
+                        "WHERE (title LIKE ? OR title_alias LIKE ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
+                        (f"%{sub_query}%", f"%{sub_query}%")
+                    )
 
             print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 매칭 도서={'있음' if book else '없음'}")
 
@@ -348,7 +366,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         # 검색 축(axis) 구성: ISBN이 있으면 [ISBN, 제목, 저자] 3개, 없으면 [제목, 저자] 2개
         # (저자는 DB/정본 조회에서 값이 있을 때만 axis로 추가됨)
-        raw_db_title = get_row_val(book, 'title') if book else ''
+        # title_alias(사용자가 직접 지정한 표시용 별칭)가 있으면 파일명 유래일 수 있는 title보다
+        # 우선해서 검색축 기준 제목으로 사용한다.
+        raw_db_title = (get_row_val(book, 'title_alias') or get_row_val(book, 'title')) if book else ''
         raw_db_author = get_row_val(book, 'author') if book else ''
 
         # DB의 title 컬럼에 파일명 유래 태그(예: "[유민주]", "#353")가 안 지워진 채 남아있을 수 있으므로,
@@ -485,7 +505,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 return []
 
             # 2) [메타데이터 합성 및 정렬] 같은 책을 가리키는 결과들을 그룹으로 묶고,
-            #    표지/서지정보 모두 알라딘 > 국립중앙도서관 > 구글 순으로 합성
+            #    표지/서지정보 모두 알라딘 > 국립중앙도서관 > 네이버 > 구글 순으로 합성
             cover_priority_order = INFO_PRIORITY
 
             groups = _group_items(all_items)
@@ -557,11 +577,16 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
         gateway = self.get_db_gateway(db_type)
         try:
-            book = gateway.fetch_one("SELECT file_path, library_id FROM books WHERE id = ?", (book_id,))
+            book = gateway.fetch_one("SELECT file_path, library_id, title, metadata_locked FROM books WHERE id = ?", (book_id,))
             if not book:
                 print(f"[UnifiedBook] [5단계:저장] book_id={book_id} 에 해당하는 도서를 찾지 못함")
                 return False, "도서를 찾을 수 없습니다."
 
+            is_locked = parse_bool(get_row_val(book, 'metadata_locked'), default=False)
+            if is_locked:
+                print(f"[UnifiedBook] [5단계:저장] book_id={book_id} 는 metadata_locked=1 이지만 강제 저장 진행")
+
+            existing_title = get_row_val(book, 'title') or ''
             file_path = get_row_val(book, 'file_path')
             library_id = get_row_val(book, 'library_id')
             cover_url, cover_filename = item_data.get('cover'), None
@@ -597,6 +622,17 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             if not clean_title:
                 clean_title = raw_title
 
+            # 기존 title과 새로 검색된 title이 다르면, 원본 title 컬럼은 그대로 두고
+            # 검색된 제목을 title_alias(표시용 별칭)에 저장한다. 같으면 title_alias는 건드리지 않는다.
+            if existing_title and clean_title and _normalize_title(existing_title) != _normalize_title(clean_title):
+                final_title = existing_title
+                title_alias_value = clean_title
+                print(f"[UnifiedBook] [5단계:저장] 기존 title={existing_title!r} != 검색된 title={clean_title!r} "
+                      f"-> title은 유지하고 title_alias에 저장")
+            else:
+                final_title = clean_title
+                title_alias_value = ''
+
             # ISBN 표준화 (특수 문자 및 하이픈 제거 후 대문자 X 정렬)
             raw_isbn = item_data.get('isbn', '')
             clean_isbn = re.sub(r'[^0-9X]', '', str(raw_isbn).upper()) if raw_isbn else ''
@@ -614,22 +650,26 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 gateway.execute(
                     """UPDATE books SET title = ?, author = ?, publisher = ?, summary = ?, link = ?, 
                        release_date = ?, isbn = COALESCE(NULLIF(?, ''), isbn), cover_image = COALESCE(NULLIF(?, ''), cover_image),
+                       title_alias = COALESCE(NULLIF(?, ''), title_alias),
                        cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
                        WHERE id = ?""",
-                    (clean_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, cover_filename, cover_filename, book_id)
+                    (final_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
+                     item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, title_alias_value,
+                     cover_filename, cover_filename, book_id)
                 )
             else:
                 gateway.execute(
                     """UPDATE books SET title = ?, author = ?, publisher = ?, summary = ?, link = ?, 
                        release_date = ?, cover_image = COALESCE(NULLIF(?, ''), cover_image),
+                       title_alias = COALESCE(NULLIF(?, ''), title_alias),
                        cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
                        WHERE id = ?""",
-                    (clean_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, cover_filename, cover_filename, cover_filename, book_id)
+                    (final_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
+                     item_data.get('link'), clean_pub_date, cover_filename, title_alias_value,
+                     cover_filename, cover_filename, book_id)
                 )
 
-            print(f"[UnifiedBook] [5단계:저장] books 테이블 UPDATE 실행 (title={clean_title!r}, isbn컬럼존재={has_isbn_column})")
+            print(f"[UnifiedBook] [5단계:저장] books 테이블 UPDATE 실행 (title={final_title!r}, title_alias={title_alias_value!r}, isbn컬럼존재={has_isbn_column}, 강제저장={is_locked})")
 
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
         except Exception as e:
