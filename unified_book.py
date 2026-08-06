@@ -2,6 +2,7 @@
 import os
 import re
 import urllib.request
+import urllib.parse
 import hashlib
 import io
 import zipfile
@@ -107,6 +108,36 @@ def _clean_author_field(raw):
         if name and name not in names:
             names.append(name)
     return ','.join(names)
+
+
+def _extract_isbn_from_link(link):
+    """books.link 컬럼에 저장된 URL(알라딘/네이버 등 상품 페이지 링크)에서 ISBN을 파싱한다.
+    1) 쿼리스트링에 ISBN/isbn/isbn13 계열 파라미터가 있으면 우선 사용
+    2) 없으면 URL 문자열 전체에서 10자리(마지막 자리 X 허용)/13자리 숫자열 후보를 뽑아
+       체크섬 검증(validate_isbn13/validate_isbn10)을 통과하는 값을 채택
+    유효한 ISBN을 찾지 못하면 None을 반환한다."""
+    if not link:
+        return None
+
+    try:
+        parsed = urllib.parse.urlparse(link)
+        qs = urllib.parse.parse_qs(parsed.query)
+        for key in ('ISBN', 'isbn', 'Isbn', 'ISBN13', 'isbn13'):
+            values = qs.get(key)
+            if not values:
+                continue
+            candidate = re.sub(r'[^0-9X]', '', values[0].upper())
+            if validate_isbn13(candidate) or validate_isbn10(candidate):
+                return candidate
+    except Exception:
+        pass
+
+    for match in re.findall(r'\d{13}|\d{9}[\dX]', link.upper()):
+        candidate = re.sub(r'[^0-9X]', '', match)
+        if validate_isbn13(candidate) or validate_isbn10(candidate):
+            return candidate
+
+    return None
 
 
 def _isbn13_of(item):
@@ -259,7 +290,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             # 입력값 자체가 ISBN인 경우에도, 제목/저자를 함께 쓰기 위해 DB에서 해당 ISBN 도서를 조회
             # (삭제 표시된 도서는 매칭 대상에서 제외)
             book = gateway.fetch_one(
-                "SELECT file_path, title, author, isbn, title_alias FROM books WHERE isbn = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
+                "SELECT file_path, title, author, isbn, title_alias, link FROM books WHERE isbn = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
                 (clean_query,)
             )
             print(f"[UnifiedBook] [1단계:로컬 파싱] DB에서 동일 ISBN 도서 조회={'있음' if book else '없음'} (제목/저자 axis 보강용)")
@@ -270,13 +301,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             # title 뿐 아니라 사용자가 직접 지정한 title_alias(표시용 별칭)도 함께 매칭하고,
             # 삭제 표시된 도서(is_deleted=1)는 매칭 대상에서 제외한다.
             book = gateway.fetch_one(
-                "SELECT file_path, title, author, isbn, title_alias FROM books "
+                "SELECT file_path, title, author, isbn, title_alias, link FROM books "
                 "WHERE (title = ? OR title_alias = ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
                 (clean_query_base, clean_query_base)
             )
             if not book:
                 book = gateway.fetch_one(
-                    "SELECT file_path, title, author, isbn, title_alias FROM books "
+                    "SELECT file_path, title, author, isbn, title_alias, link FROM books "
                     "WHERE file_path LIKE ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
                     (f"%{clean_query_base}%",)
                 )
@@ -287,7 +318,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
                     book = gateway.fetch_one(
-                        "SELECT file_path, title, author, isbn, title_alias FROM books "
+                        "SELECT file_path, title, author, isbn, title_alias, link FROM books "
                         "WHERE (title LIKE ? OR title_alias LIKE ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
                         (f"%{sub_query}%", f"%{sub_query}%")
                     )
@@ -325,6 +356,22 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             print("[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔에서도 ISBN을 찾지 못함")
                     else:
                         print("[UnifiedBook] [2단계:DB/파일 파싱] ISBN_FILE_SCAN 옵션 꺼짐 -> 파일 스캔 건너뜀")
+
+        # 2.5단계: 1~2단계에서도 ISBN을 못 찾았다면, DB에 저장된 link 컬럼(알라딘/네이버 등
+        # 상품 페이지 URL)을 마지막으로 파싱해서 ISBN을 추출 시도한다.
+        if not is_isbn and book:
+            raw_link = get_row_val(book, 'link')
+            if raw_link:
+                link_isbn = _extract_isbn_from_link(raw_link)
+                if link_isbn:
+                    is_isbn = True
+                    search_query = link_isbn
+                    detection_source = "LINK"
+                    print(f"[UnifiedBook] [2.5단계:link 파싱] link={raw_link!r} 에서 ISBN 파싱 성공 -> {link_isbn}")
+                else:
+                    print(f"[UnifiedBook] [2.5단계:link 파싱] link={raw_link!r} 에서 ISBN을 찾지 못함")
+            else:
+                print("[UnifiedBook] [2.5단계:link 파싱] DB에 link 값 없음 -> 건너뜀")
 
         # ISBN이 확정된 경우, 국립중앙도서관 -> 알라딘 순으로 ISBN 정밀 조회를 선행하여
         # 이후 제목/저자 축(axis) 검색에 사용할 "정본" 제목/저자를 확보한다.
@@ -543,6 +590,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         merged['title'] = f"[{label}/LOCAL] {original_title} *"
                     elif detection_source == "AI":
                         merged['title'] = f"[{label}/AI] {original_title} *"
+                    elif detection_source == "LINK":
+                        merged['title'] = f"[{label}/LINK] {original_title} *"
                     else:
                         merged['title'] = f"[{label}/ISBN] {original_title} *"
                 else:
