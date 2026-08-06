@@ -262,7 +262,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "show_sample_update_button": True,
     }
     config_schema = [
-        {"key": "NLK_CERT_KEY", "label": "국립중앙도서관 Seoji 인증키", "type": "password", "required": False},
+        {"key": "NLK_CERT_KEY", "label": "국립중앙도서관 Seoji 인증키", "type": "text", "required": False},
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
