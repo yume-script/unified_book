@@ -305,15 +305,26 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             final_summary = re.sub('<[^<]+?>', '', item_data.get('description', ''))
 
             # 안전 조치: DB 테이블 정보 조회하여 'isbn' 컬럼 존재 여부 동적 체크
-            # (설정된 DB 유형에 따라 조회 구문/결과 컬럼 키가 다르므로 분기 처리)
-            if db_engine == "mariadb":
-                # MariaDB는 PRAGMA를 지원하지 않으므로 SHOW COLUMNS 사용, 결과 키는 'Field'
-                columns_info = gateway.fetch_all("SHOW COLUMNS FROM books")
-                columns = [col['Field'].lower() for col in columns_info] if columns_info else []
-            else:
-                # SQLite: 기존 PRAGMA 방식, 결과 키는 'name'
-                columns_info = gateway.fetch_all("PRAGMA table_info(books)")
-                columns = [col['name'].lower() for col in columns_info] if columns_info else []
+            # 설정의 DB_TYPE 값을 우선 참고하되, 실제 게이트웨이가 다른 엔진일 수 있으므로
+            # 첫 시도가 실패하면 반대 방식으로 자동 폴백한다 (라이브러리별로 엔진이 섞여 있는 경우 대비)
+            def _try_pragma():
+                info = gateway.fetch_all("PRAGMA table_info(books)")
+                return [col['name'].lower() for col in info] if info else []
+
+            def _try_show_columns():
+                info = gateway.fetch_all("SHOW COLUMNS FROM books")
+                return [col['Field'].lower() for col in info] if info else []
+
+            primary, fallback = (_try_show_columns, _try_pragma) if db_engine == "mariadb" else (_try_pragma, _try_show_columns)
+            try:
+                columns = primary()
+            except Exception as e:
+                logger.warning("[통합 도서 검색] 컬럼 조회 1차 시도 실패(설정: %s), 다른 방식으로 재시도합니다: %s", db_engine, e)
+                try:
+                    columns = fallback()
+                except Exception as e2:
+                    logger.error("[통합 도서 검색] 컬럼 조회 최종 실패 (book_id=%s): %s", book_id, e2)
+                    columns = []
             has_isbn_column = 'isbn' in columns
 
             # CASE WHEN 조건문을 적용하여, 새로운 커버 이미지가 실제로 성공적으로 반영되었을 때만 cover_updated_at 갱신
