@@ -333,22 +333,22 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         except Exception as e:
             return False, f"적용 오류: {str(e)}"
 
-    def get_context_menu_items(self, db_type, context):
-        return [
-            {
-                'id': 'unified_search_link',
-                'label': '통합 검색 결과 열기',
-                'icon': 'fa-solid fa-magnifying-glass',
-            }
-        ]
+    #def get_context_menu_items(self, db_type, context):
+    #    return [
+    #        {
+    #            'id': 'unified_search_link',
+    #            'label': '통합 검색 결과 열기',
+    #            'icon': 'fa-solid fa-magnifying-glass',
+    #        }
+    #    ]
 
-    def run_context_menu_action(self, db_type, action_id, context):
-        if action_id == 'unified_search_link':
-            query = context.get('book_title')
-            url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
-            return {
-                'success': True, 
-                'message': '통합 검색 페이지를 엽니다.', 
-                'open_url': url
-            }
-        return {'success': False, 'error': '알 수 없는 액션입니다.'}
+    #def run_context_menu_action(self, db_type, action_id, context):
+    #    if action_id == 'unified_search_link':
+    #        query = context.get('book_title')
+    #        url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
+    #        return {
+    #            'success': True, 
+    #            'message': '통합 검색 페이지를 엽니다.', 
+    #            'open_url': url
+    #        }
+    #    return {'success': False, 'error': '알 수 없는 액션입니다.'}
