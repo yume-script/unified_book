@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
 import re
+import logging
+import traceback
 import urllib.request
 import urllib.parse
 import hashlib
@@ -16,6 +18,8 @@ except ImportError:
     Image = None
 
 from plugins.metadata.base import BaseMetadataProvider
+
+logger = logging.getLogger(__name__)
 
 # 임포트 섀도잉(Import Shadowing) 원천 차단 및 새로운 utils_unified 동적 로드 지원
 def _import_local_module(module_name):
@@ -176,7 +180,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     source_name = futures[future]
                     try:
                         items = future.result()
-                    except Exception:
+                    except Exception as e:
+                        logger.warning("[통합 도서 검색] '%s' 소스 조회 실패: %s", source_name, e)
                         continue
                     
                     for item in items:
@@ -278,7 +283,9 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         with Image.open(io.BytesIO(response.read())) as img:
                             img.save(dest_path, "WEBP", quality=95)
                     cover_filename = f"{library_id}/{cover_filename}"
-                except: cover_filename = None
+                except Exception as e:
+                    logger.warning("[통합 도서 검색] 표지 이미지 다운로드/저장 실패 (book_id=%s): %s", book_id, e)
+                    cover_filename = None
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
             pub_date_raw = item_data.get('pubDate', '')
@@ -331,24 +338,25 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
         except Exception as e:
+            logger.error("[통합 도서 검색] apply() 처리 중 오류 (book_id=%s): %s\n%s", book_id, e, traceback.format_exc())
             return False, f"적용 오류: {str(e)}"
 
-    #def get_context_menu_items(self, db_type, context):
-    #    return [
-    #        {
-    #            'id': 'unified_search_link',
-    #            'label': '통합 검색 결과 열기',
-    #            'icon': 'fa-solid fa-magnifying-glass',
-    #        }
-    #    ]
+    def get_context_menu_items(self, db_type, context):
+        return [
+            {
+                'id': 'unified_search_link',
+                'label': '통합 검색 결과 열기',
+                'icon': 'fa-solid fa-magnifying-glass',
+            }
+        ]
 
-    #def run_context_menu_action(self, db_type, action_id, context):
-    #    if action_id == 'unified_search_link':
-    #        query = context.get('book_title')
-    #        url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
-    #        return {
-    #            'success': True, 
-    #            'message': '통합 검색 페이지를 엽니다.', 
-    #            'open_url': url
-    #        }
-    #    return {'success': False, 'error': '알 수 없는 액션입니다.'}
+    def run_context_menu_action(self, db_type, action_id, context):
+        if action_id == 'unified_search_link':
+            query = context.get('book_title')
+            url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
+            return {
+                'success': True, 
+                'message': '통합 검색 페이지를 엽니다.', 
+                'open_url': url
+            }
+        return {'success': False, 'error': '알 수 없는 액션입니다.'}
