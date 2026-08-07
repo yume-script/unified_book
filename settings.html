@@ -2,6 +2,22 @@
   <div class="ubs-plugin-title">통합 도서 검색 설정 (Ver 1.6.1)</div>
   <div class="ubs-plugin-desc">국립중앙도서관, 알라딘, 구글의 도서 오픈 API 데이터를 동시에 조회하고, ISBN/제목 기준으로 하나의 도서 정보로 합성하여 채워 넣습니다.</div>
 
+  <!-- 데이터베이스 유형 선택 -->
+  <div class="ubs-plugin-field">
+    <label>데이터베이스 유형</label>
+    <div class="ubs-input-container">
+      <label class="ubs-checkbox-label" for="ubs-db-sqlite">
+        <input id="ubs-db-sqlite" type="radio" name="DB_TYPE" value="sqlite" checked />
+        <span>SQLite</span>
+      </label>
+      <label class="ubs-checkbox-label" for="ubs-db-mariadb">
+        <input id="ubs-db-mariadb" type="radio" name="DB_TYPE" value="mariadb" />
+        <span>MariaDB</span>
+      </label>
+      <p class="hint">현재 사용 중인 도서 데이터베이스 종류를 선택하세요. 컬럼 조회 방식(PRAGMA / SHOW COLUMNS)이 이 값에 따라 자동으로 분기됩니다.</p>
+    </div>
+  </div>
+
   <!-- 국립중앙도서관 Seoji OpenAPI 설정 -->
   <div class="ubs-plugin-field">
     <label for="ubs-nlk-key">국립중앙도서관 Seoji 인증키</label>

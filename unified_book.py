@@ -5,13 +5,11 @@ import urllib.request
 import urllib.parse
 import hashlib
 import io
-import sys
 import zipfile
 import json
 import html
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from difflib import SequenceMatcher
 try:
     from PIL import Image
 except ImportError:
@@ -31,26 +29,25 @@ def _import_local_module(module_name):
 
 # 임포트 안정성 확보 (패키지 로드 실패 시 경로 우회 동적 임포트 실행)
 try:
-    from .aladin import search_aladin, search_aladin_isbn, search_aladin_author
+    from .aladin import search_aladin, search_aladin_isbn
+    from .naver import search_naver, search_naver_isbn
     from .google import search_google
-    from .nlk import search_nlk, search_nlk_isbn
     from .utils_unified import (
-        format_date, get_high_res_url, validate_isbn13, validate_isbn10,
+        format_date, get_high_res_url, validate_isbn13, validate_isbn10, 
         compare_isbns, extract_isbn_from_epub, extract_isbn_from_pdf, get_row_val, parse_bool
     )
 except ImportError:
     _aladin_mod = _import_local_module("aladin")
+    _naver_mod = _import_local_module("naver")
     _google_mod = _import_local_module("google")
-    _nlk_mod = _import_local_module("nlk")
     _utils_mod = _import_local_module("utils_unified")
-
+    
     search_aladin = _aladin_mod.search_aladin
     search_aladin_isbn = _aladin_mod.search_aladin_isbn
-    search_aladin_author = _aladin_mod.search_aladin_author
+    search_naver = _naver_mod.search_naver
+    search_naver_isbn = _naver_mod.search_naver_isbn
     search_google = _google_mod.search_google
-    search_nlk = _nlk_mod.search_nlk
-    search_nlk_isbn = _nlk_mod.search_nlk_isbn
-
+    
     format_date = _utils_mod.format_date
     get_high_res_url = _utils_mod.get_high_res_url
     validate_isbn13 = _utils_mod.validate_isbn13
@@ -62,192 +59,6 @@ except ImportError:
     parse_bool = _utils_mod.parse_bool
 
 
-# 서지정보(텍스트 필드) 및 표지 병합 우선순위: 알라딘 > 국립중앙도서관 > 네이버 > 구글
-INFO_PRIORITY = ["알라딘", "국립중앙도서관", "구글"]
-
-
-def _normalize_title(title):
-    return "".join(re.findall(r"\w+", title or "")).lower()
-
-
-def _title_similar(title_a, title_b, threshold=0.35):
-    """저자 축(author axis) 검색 결과 필터링용: 두 제목이 같은 책일 가능성이 있을 만큼
-    비슷한지 판단한다. 한쪽 제목이 다른쪽에 포함되거나(부제/부분 표제 차이 등),
-    문자 단위 유사도가 threshold 이상이면 True. 저자는 같지만 제목이 전혀 다른
-    '동명 저자의 다른 책'을 걸러내기 위한 용도."""
-    a = _normalize_title(title_a)
-    b = _normalize_title(title_b)
-    if not a or not b:
-        return False
-    if a in b or b in a:
-        return True
-    return SequenceMatcher(None, a, b).ratio() >= threshold
-
-
-def _clean_author_field(raw):
-    """국립중앙도서관/알라딘 등의 AUTHOR 필드는 '저자 : 홍길동 ; 옮긴이 : 김철수 ;' 처럼
-    역할 라벨 + 세미콜론(또는 콤마) 구분자로 오는 경우가 있어, 검색 axis에 그대로 넘기면
-    다른 소스에서 저자명으로 인식하지 못한다. 역할 라벨을 떼어내고 순수 이름만
-    콤마로 이어붙여 DB 저장 형식(예: '백현기,김영철')과 동일하게 정규화한다.
-    번역/삽화/감수 등 저자가 아닌 역할은 제외한다."""
-    if not raw:
-        return ''
-    exclude_roles = ('옮긴이', '역자', '번역', '그림', '삽화', '감수', '해설', '편집')
-    names = []
-    for part in re.split(r'[;,]', raw):
-        part = part.strip().rstrip(';').strip()
-        if not part:
-            continue
-        m = re.match(r'^([가-힣A-Za-z]+)\s*[:：]\s*(.+)$', part)
-        if m:
-            role, name = m.group(1).strip(), m.group(2).strip()
-            if role in exclude_roles:
-                continue
-        else:
-            name = part
-        name = name.strip()
-        if name and name not in names:
-            names.append(name)
-    return ','.join(names)
-
-
-def _extract_isbn_from_link(link):
-    """books.link 컬럼에 저장된 URL(알라딘/네이버 등 상품 페이지 링크)에서 ISBN을 파싱한다.
-    1) 쿼리스트링에 ISBN/isbn/isbn13 계열 파라미터가 있으면 우선 사용
-    2) 없으면 URL 문자열 전체에서 10자리(마지막 자리 X 허용)/13자리 숫자열 후보를 뽑아
-       체크섬 검증(validate_isbn13/validate_isbn10)을 통과하는 값을 채택
-    유효한 ISBN을 찾지 못하면 None을 반환한다."""
-    if not link:
-        return None
-
-    try:
-        parsed = urllib.parse.urlparse(link)
-        qs = urllib.parse.parse_qs(parsed.query)
-        for key in ('ISBN', 'isbn', 'Isbn', 'ISBN13', 'isbn13'):
-            values = qs.get(key)
-            if not values:
-                continue
-            candidate = re.sub(r'[^0-9X]', '', values[0].upper())
-            if validate_isbn13(candidate) or validate_isbn10(candidate):
-                return candidate
-    except Exception:
-        pass
-
-    for match in re.findall(r'\d{13}|\d{9}[\dX]', link.upper()):
-        candidate = re.sub(r'[^0-9X]', '', match)
-        if validate_isbn13(candidate) or validate_isbn10(candidate):
-            return candidate
-
-    return None
-
-
-def _contains_at_word_boundary(text, query):
-    """text 안에 query가 '단어 경계'에서 시작하는 부분 문자열로 존재하는지 검사한다.
-    한글은 띄어쓰기 없이 조사가 바로 붙는 경우가 많아 완전한 어절 경계 판정은 어렵지만,
-    최소한 검색어 시작 위치 바로 앞 글자가 한글 음절/영숫자로 곧장 이어지는 복합어의
-    중간이 아니어야 한다는 조건만 걸어도, 짧은 검색어가 완전히 무관한 단어 중간에
-    우연히 끼어드는 오매칭(예: '성의 과학'이 '불확정성의 과학을 열다' 중간에 걸리는 경우)을
-    대부분 걸러낼 수 있다."""
-    if not text or not query:
-        return False
-    start = 0
-    text_l = text.lower()
-    query_l = query.lower()
-    while True:
-        idx = text_l.find(query_l, start)
-        if idx == -1:
-            return False
-        if idx == 0:
-            return True
-        prev = text[idx - 1]
-        if not (('가' <= prev <= '힣') or prev.isalnum()):
-            return True
-        start = idx + 1
-
-
-def _isbn13_of(item):
-    """item의 isbn을 정규화된 13자리로 변환(가능한 경우). 그룹핑 매칭용."""
-    raw = re.sub(r"[^0-9X]", "", str(item.get("isbn") or "").upper())
-    if validate_isbn13(raw):
-        return raw
-    if validate_isbn10(raw):
-        core = "978" + raw[:9]
-        total = sum((int(d) * (1 if i % 2 == 0 else 3)) for i, d in enumerate(core))
-        check = (10 - (total % 10)) % 10
-        return core + str(check)
-    return None
-
-
-def _group_items(all_items):
-    """서로 다른 소스에서 온 결과 중 같은 책을 가리키는 항목들을 하나의 그룹으로 묶는다.
-    ISBN이 일치하면 최우선으로 병합하고, ISBN이 없으면 정규화된 제목 일치로 병합한다."""
-    groups = []
-    for item in all_items:
-        if not item.get("title"):
-            continue
-        isbn13 = _isbn13_of(item)
-        norm_t = _normalize_title(item.get("title"))
-
-        matched = None
-        if isbn13:
-            for g in groups:
-                if g["isbn"] == isbn13:
-                    matched = g
-                    break
-        if not matched:
-            for g in groups:
-                if g["title"] == norm_t:
-                    matched = g
-                    break
-
-        if matched:
-            matched["items"].append(item)
-            if isbn13 and not matched["isbn"]:
-                matched["isbn"] = isbn13
-        else:
-            groups.append({"isbn": isbn13, "title": norm_t, "items": [item]})
-    return groups
-
-
-def _pick_by_priority(items, field, priority_order):
-    """priority_order 순서대로 값이 채워진 소스를 찾아 (값, 출처)를 반환. 없으면 아무 소스에서나."""
-    by_source = {}
-    for it in items:
-        by_source.setdefault(it.get("source"), it)
-    for src in priority_order:
-        it = by_source.get(src)
-        if it and it.get(field):
-            return it.get(field), src
-    for it in items:
-        if it.get(field):
-            return it.get(field), it.get("source")
-    return "", None
-
-
-def _merge_group(items, cover_priority_order, info_priority_order):
-    """한 그룹(동일 도서로 판정된 여러 소스 결과)을 우선순위에 따라 하나로 합성.
-    - 표지(cover): cover_priority_order (옵션에 따라 알라딘 최우선)
-    - 그 외 서지정보(title/author/publisher/pubDate/isbn/description/link): info_priority_order
-      (국립중앙도서관 > 알라딘 > 네이버 > 구글)
-    """
-    merged = {}
-    for field in ("title", "author", "publisher", "pubDate", "isbn", "description", "link"):
-        val, _src = _pick_by_priority(items, field, info_priority_order)
-        merged[field] = val
-
-    cover_val, cover_src = _pick_by_priority(items, "cover", cover_priority_order)
-    merged["cover"] = get_high_res_url(cover_val, cover_src) if cover_val else ""
-
-    contributing = [src for src in info_priority_order if any(it.get("source") == src for it in items)]
-    for it in items:
-        src = it.get("source")
-        if src and src not in contributing:
-            contributing.append(src)
-    merged["_sources"] = contributing
-    merged["source"] = "+".join(contributing) if contributing else ""
-    return merged
-
-
 class UnifiedBookMetadataProvider(BaseMetadataProvider):
     id = "unified_book"
     name = "통합 도서 검색"
@@ -257,14 +68,18 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "enabled": True,
         "provider": "github-raw",
         "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/refs/heads/main/",
-        "files": ["unified_book.py", "aladin.py", "google.py", "nlk.py", "utils_unified.py", "settings.html", "style.css", "__init__.py", "VERSION"],
+        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "utils_unified.py", "index.html", "style.css", "__init__.py", "VERSION"],
         "version_file": "VERSION",
         "version_key": "plugin version",
         "show_sample_update_button": True,
     }
     config_schema = [
-        {"key": "NLK_CERT_KEY", "label": "국립중앙도서관 Seoji 인증키", "type": "text", "required": False},
+        {"key": "DB_TYPE", "label": "데이터베이스 유형", "type": "radio",
+         "options": [{"value": "sqlite", "label": "SQLite"}, {"value": "mariadb", "label": "MariaDB"}],
+         "default": "sqlite", "required": False},
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
+        {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
+        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
         {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
@@ -276,116 +91,58 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
     def search(self, db_type, query):
         if not query:
             return []
-
-        print(f"[UnifiedBook] ===== 검색 시작 | query={query!r} db_type={db_type!r} =====")
-
+            
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
         isbn_file_scan = parse_bool(config.get("ISBN_FILE_SCAN", True), default=True)
         gemini_key = config.get("GEMINI_API_KEY", "").strip()
         llm_endpoint = config.get("LITELLM_ENDPOINT", "").strip()
         llm_model = config.get("LITELLM_MODEL", "").strip()
-
+        
         # 검색어 정밀 전처리 전개 (파일 확장자 및 대괄호/소괄호 노이즈 제거)
         clean_query_base = re.sub(r'\.(epub|pdf|txt|zip|cbz|mobi|azw3|djvu|html)$', '', query, flags=re.IGNORECASE)
-        clean_query_base = re.sub(r'\[.*?\]|\(.*?\)', '', clean_query_base)
-        clean_query_base = re.sub(r'#\d+', '', clean_query_base)
-        clean_query_base = re.sub(r'\s{2,}', ' ', clean_query_base).strip()
+        clean_query_base = re.sub(r'\[.*?\]|\(.*?\)', '', clean_query_base).strip()
         if not clean_query_base:
             clean_query_base = query
 
         norm_query = "".join(re.findall(r'\w+', clean_query_base.replace('_', ''))).lower()
-
+        
         # 입력받은 기본 검색어가 이미 유효한 ISBN 구성인지 우선 감지
         clean_query = re.sub(r'[^0-9X]', '', query.upper())
         is_isbn = validate_isbn13(clean_query) or validate_isbn10(clean_query)
         search_query = clean_query if is_isbn else query
-
+        
         # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
         detection_source = "INPUT" if is_isbn else None
 
-        print(f"[UnifiedBook] [1단계:로컬 파싱] 입력값 ISBN 여부={is_isbn} "
-              f"{'(search_query=' + search_query + ')' if is_isbn else '(ISBN 아님, 2단계로 진행)'}")
-
         # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
-        gateway = self.get_db_gateway(db_type)
-        book = None
-
-        if is_isbn:
-            # 입력값 자체가 ISBN인 경우에도, 제목/저자를 함께 쓰기 위해 DB에서 해당 ISBN 도서를 조회
-            # (삭제 표시된 도서는 매칭 대상에서 제외)
-            book = gateway.fetch_one(
-                "SELECT file_path, title, author, isbn, title_alias, link FROM books WHERE isbn = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
-                (clean_query,)
-            )
-            print(f"[UnifiedBook] [1단계:로컬 파싱] DB에서 동일 ISBN 도서 조회={'있음' if book else '없음'} (제목/저자 axis 보강용)")
-        else:
-            print(f"[UnifiedBook] [2단계:DB/파일 파싱] clean_query_base={clean_query_base!r} 로 books 테이블 조회 시작")
-
+        if not is_isbn:
+            gateway = self.get_db_gateway(db_type)
+            
             # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
-            # title 뿐 아니라 사용자가 직접 지정한 title_alias(표시용 별칭)도 함께 매칭하고,
-            # 삭제 표시된 도서(is_deleted=1)는 매칭 대상에서 제외한다.
-            # 💡 매칭 정확도가 높은 순서대로 시도한다: 1) title/alias 완전일치 -> 2) title/alias
-            #    단어 부분일치 -> 3) 최후 수단으로 파일명(디렉토리 경로 제외) 부분일치.
-            #    예전에는 2)와 3) 순서가 뒤바뀌어 있었고, LIKE 부분일치가 단순 substring이라
-            #    "성의 과학" 같은 짧은 검색어가 완전히 무관한 책의 제목/파일명 중간
-            #    ("...불확정성의 과학을 열다...")에 우연히 걸리는 오매칭이 있었다.
-            #    이제 SQL LIKE로 후보만 넉넉히 추려온 뒤, 파이썬에서 _contains_at_word_boundary로
-            #    "단어 경계에서 시작하는 매칭"인지 재검증해서 최종 채택한다.
-            book = gateway.fetch_one(
-                "SELECT file_path, title, author, isbn, title_alias, link FROM books "
-                "WHERE (title = ? OR title_alias = ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
-                (clean_query_base, clean_query_base)
-            )
-
+            book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
+            if not book:
+                book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
+                
+            # 유연한 부분일치 검색 추가 가동
             if not book:
                 words = [w for w in clean_query_base.split() if len(w) > 1]
                 if len(words) >= 2:
                     sub_query = " ".join(words[:2])
-                    candidates = gateway.fetch_all(
-                        "SELECT file_path, title, author, isbn, title_alias, link FROM books "
-                        "WHERE (title LIKE ? OR title_alias LIKE ?) AND COALESCE(is_deleted, 0) = 0 LIMIT 20",
-                        (f"%{sub_query}%", f"%{sub_query}%")
-                    ) or []
-                    for cand in candidates:
-                        cand_title = get_row_val(cand, 'title') or ''
-                        cand_alias = get_row_val(cand, 'title_alias') or ''
-                        if _contains_at_word_boundary(cand_title, sub_query) or _contains_at_word_boundary(cand_alias, sub_query):
-                            book = cand
-                            break
-
-            # 최후 수단: 그래도 못 찾았으면 파일명(디렉토리 경로는 제외하고 마지막 '/' 뒤쪽만)에서
-            # 단어 경계 부분일치를 시도한다. 디렉토리 경로까지 포함해서 매칭하면 폴더명에
-            # 우연히 검색어가 섞여 들어가는 오매칭이 생기기 쉬우므로, 후보를 넉넉히 가져온 뒤
-            # os.path.basename()으로 파일명만 뽑아 단어 경계 매칭을 확인한다.
-            if not book:
-                candidates = gateway.fetch_all(
-                    "SELECT file_path, title, author, isbn, title_alias, link FROM books "
-                    "WHERE COALESCE(is_deleted, 0) = 0 AND file_path LIKE ? LIMIT 20",
-                    (f"%{clean_query_base}%",)
-                ) or []
-                for cand in candidates:
-                    basename = os.path.basename(get_row_val(cand, 'file_path') or '')
-                    if _contains_at_word_boundary(basename, clean_query_base):
-                        book = cand
-                        break
-
-            print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 매칭 도서={'있음' if book else '없음'}")
-
+                    book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
+                
             if book:
                 db_isbn = get_row_val(book, 'isbn')
                 clean_db_isbn = re.sub(r'[^0-9X]', '', str(db_isbn).upper()) if db_isbn else ''
-
+                
                 if validate_isbn13(clean_db_isbn) or validate_isbn10(clean_db_isbn):
                     is_isbn = True
                     search_query = clean_db_isbn
                     detection_source = "DB"  # 감지출처: 데이터베이스
-                    print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB에 저장된 ISBN 발견 -> search_query={search_query}")
                 else:
                     # 파일 실시간 스캔 옵션이 켜져 있을 때만 EPUB/PDF의 무거운 헤더 디코딩을 진행함
                     if isbn_file_scan:
                         file_path = get_row_val(book, 'file_path')
-                        print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB에 ISBN 없음 -> 파일 스캔 시도: {file_path!r}")
                         extracted_isbn, method = None, None
                         if file_path and os.path.exists(file_path):
                             ext = os.path.splitext(file_path)[1].lower()
@@ -393,302 +150,120 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                                 extracted_isbn, method = extract_isbn_from_epub(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
                             elif ext == '.pdf':
                                 extracted_isbn, method = extract_isbn_from_pdf(file_path, gemini_key=gemini_key, llm_endpoint=llm_endpoint, llm_model=llm_model)
-
+                                
                         if extracted_isbn:
                             is_isbn = True
                             search_query = extracted_isbn
                             detection_source = method  # 감지출처: LOCAL 또는 AI
-                            print(f"[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔으로 ISBN 추출 성공 (경로: {method}) -> {extracted_isbn}")
-                        else:
-                            print("[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔에서도 ISBN을 찾지 못함")
-                    else:
-                        print("[UnifiedBook] [2단계:DB/파일 파싱] ISBN_FILE_SCAN 옵션 꺼짐 -> 파일 스캔 건너뜀")
 
-        # 2.5단계: 1~2단계에서도 ISBN을 못 찾았다면, DB에 저장된 link 컬럼(알라딘/네이버 등
-        # 상품 페이지 URL)을 마지막으로 파싱해서 ISBN을 추출 시도한다.
-        if not is_isbn and book:
-            raw_link = get_row_val(book, 'link')
-            if raw_link:
-                link_isbn = _extract_isbn_from_link(raw_link)
-                if link_isbn:
-                    is_isbn = True
-                    search_query = link_isbn
-                    detection_source = "LINK"
-                    print(f"[UnifiedBook] [2.5단계:link 파싱] link={raw_link!r} 에서 ISBN 파싱 성공 -> {link_isbn}")
-                else:
-                    print(f"[UnifiedBook] [2.5단계:link 파싱] link={raw_link!r} 에서 ISBN을 찾지 못함")
-            else:
-                print("[UnifiedBook] [2.5단계:link 파싱] DB에 link 값 없음 -> 건너뜀")
-
-        # ISBN이 확정된 경우, 국립중앙도서관 -> 알라딘 순으로 ISBN 정밀 조회를 선행하여
-        # 이후 제목/저자 축(axis) 검색에 사용할 "정본" 제목/저자를 확보한다.
-        # - 국립중앙도서관에서 ISBN이 검출되면 그 결과의 제목/저자를 정본으로 사용
-        # - 국립중앙도서관에서 못 찾으면 알라딘의 ISBN 검색 결과의 제목/저자로 대체
-        # - 둘 다 못 찾으면 기존처럼 DB의 title/author를 사용 (아래에서 폴백 처리)
-        canonical_title, canonical_author, canonical_route = '', '', None
-        if is_isbn:
-            nlk_key = config.get("NLK_CERT_KEY")
-            try:
-                nlk_hits = search_nlk_isbn(search_query, nlk_key) if nlk_key else []
-            except Exception as e:
-                print(f"[UnifiedBook] [2단계:정본 조회] 국립중앙도서관 ISBN 조회 실패: {e}")
-                nlk_hits = []
-
-            if nlk_hits and nlk_hits[0].get('title'):
-                canonical_title = nlk_hits[0].get('title', '')
-                canonical_author = _clean_author_field(nlk_hits[0].get('author', ''))
-                canonical_route = '국립중앙도서관'
-                print(f"[UnifiedBook] [2단계:정본 조회] 국립중앙도서관 ISBN 검출 성공 -> "
-                      f"title={canonical_title!r} author={canonical_author!r}")
-            else:
-                print("[UnifiedBook] [2단계:정본 조회] 국립중앙도서관 ISBN 미검출 -> 알라딘 ISBN 조회로 폴백")
-                aladin_key = config.get("ALADIN_KEY")
-                try:
-                    aladin_hits = search_aladin_isbn(search_query, aladin_key) if aladin_key else []
-                except Exception as e:
-                    print(f"[UnifiedBook] [2단계:정본 조회] 알라딘 ISBN 조회 실패: {e}")
-                    aladin_hits = []
-
-                if aladin_hits and aladin_hits[0].get('title'):
-                    canonical_title = aladin_hits[0].get('title', '')
-                    canonical_author = _clean_author_field(aladin_hits[0].get('author', ''))
-                    canonical_route = '알라딘'
-                    print(f"[UnifiedBook] [2단계:정본 조회] 알라딘 ISBN 검출 성공 -> "
-                          f"title={canonical_title!r} author={canonical_author!r}")
-                else:
-                    print("[UnifiedBook] [2단계:정본 조회] 알라딘 ISBN도 미검출 -> DB/파일 기반 제목·저자 사용")
-
-        # 검색 축(axis) 구성: ISBN이 있으면 [ISBN, 제목, 저자] 3개, 없으면 [제목, 저자] 2개
-        # (저자는 DB/정본 조회에서 값이 있을 때만 axis로 추가됨)
-        # title_alias(사용자가 직접 지정한 표시용 별칭)가 있으면 파일명 유래일 수 있는 title보다
-        # 우선해서 검색축 기준 제목으로 사용한다.
-        raw_db_title = (get_row_val(book, 'title_alias') or get_row_val(book, 'title')) if book else ''
-        raw_db_author = get_row_val(book, 'author') if book else ''
-
-        # DB의 title 컬럼에 파일명 유래 태그(예: "[유민주]", "#353")가 안 지워진 채 남아있을 수 있으므로,
-        # clean_query_base와 동일한 정제(대괄호/소괄호 제거) + 일련번호 태그(#숫자) 제거를 한 번 더 적용해서
-        # 검색 축을 보호한다. (예: "오늘부터 여행작가 [박동식]#353" -> "오늘부터 여행작가")
-        def _strip_brackets(text):
-            cleaned = re.sub(r'\[.*?\]|\(.*?\)', '', text or '')
-            cleaned = re.sub(r'#\d+', '', cleaned)
-            cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
-            return cleaned or (text or '')
-
-        # 정본 제목/저자(국립중앙도서관 또는 알라딘 ISBN 조회 결과)가 있으면 최우선으로 사용하고,
-        # 없으면 기존처럼 DB에 저장된 title/author를 사용한다.
-        if canonical_title:
-            title_query = _strip_brackets(canonical_title)
-            author_query = _strip_brackets(canonical_author).strip() if canonical_author else ''
-        else:
-            title_query = _strip_brackets(raw_db_title) if raw_db_title else clean_query_base
-            author_query = _clean_author_field(_strip_brackets(raw_db_author)) if raw_db_author else ''
-
-        print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 원본 title={raw_db_title!r} author={raw_db_author!r} "
-              f"정본 출처={canonical_route or '없음'} -> 정제 후 title_query={title_query!r} author_query={author_query!r}")
-
-        # 저자가 여러 명(콤마로 구분)인 경우, 하나의 문자열로 합쳐서 검색하면
-        # 각 소스 API가 "백현기,김영철" 자체를 저자명으로 인식해 매칭에 실패하므로,
-        # 저자 1명당 별도의 author axis를 만들어 각각 검색한다.
-        author_names = [a.strip() for a in author_query.split(',') if a.strip()] if author_query else []
-
-        axes = []
-        if is_isbn:
-            axes.append(('isbn', search_query))
-        axes.append(('title', title_query))
-        for name in author_names:
-            axes.append(('author', name))
-
-        print(f"[UnifiedBook] [3단계 진입] 검색 축={[a[0] for a in axes]} "
-              f"(ISBN={'있음' if is_isbn else '없음'}, 제목={title_query!r}, 저자={author_names or '없음'})")
-
-        # 소스별 (제목검색함수, 저자검색함수, ISBN전용검색함수) 정의
-        # 💡 예전에는 title/author 축이 둘 다 'general'(=제목검색) 함수를 공유해서,
-        #    저자 축 검색조차 저자명을 "제목"으로 검색하는 바람에 결과가 안 나오는 버그가 있었다.
-        #    소스별로 title/author/isbn 세 갈래를 명확히 분리해서 각 API의 저자 전용 파라미터를 사용한다.
-        source_defs = {
-            '알라딘': {
-                'title': (search_aladin, (config.get("ALADIN_KEY"),)),
-                'author': (search_aladin_author, (config.get("ALADIN_KEY"),)),
-                'isbn': (search_aladin_isbn, (config.get("ALADIN_KEY"),)),
-            },
-            '구글': {
-                'title': (search_google, (config.get("GOOGLE_API_KEY"), 'intitle')),
-                'author': (search_google, (config.get("GOOGLE_API_KEY"), 'inauthor')),
-                'isbn': (search_google, (config.get("GOOGLE_API_KEY"), 'isbn')),
-            },
-            '국립중앙도서관': {
-                # search_nlk는 title로 먼저 시도하고 결과가 없으면 자동으로 author로 재시도하므로
-                # author 축에 그대로 써도 저자명 검색이 정상 동작한다.
-                'title': (search_nlk, (config.get("NLK_CERT_KEY"),)),
-                'author': (search_nlk, (config.get("NLK_CERT_KEY"),)),
-                'isbn': (search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
-            },
-        }
-
-        # 내부 검색 수행 전용 헬퍼 함수: 여러 축(axis) x 여러 소스의 조합을 한 번에 병렬 호출하여 합성
-        def _execute_search(axes, has_isbn):
-            tasks = []
-            for axis_type, axis_query in axes:
-                if not axis_query:
-                    continue
-                for source_name, funcs in source_defs.items():
-                    routed = funcs.get(axis_type)
-                    if routed is None:
-                        continue
-                    func, args = routed
-                    if source_name != '구글' and not all(args):
-                        continue
-                    tasks.append((source_name, axis_type, func, args, axis_query))
-
-            requested_srcs = sorted({t[0] for t in tasks})
-            print(f"[UnifiedBook] [3단계:API 병렬 호출] 총 {len(tasks)}개 작업(소스x축 조합) 실행 예정 | 참여 소스={requested_srcs}")
-
-            all_items = []
+        # 내부 검색 수행 전용 헬퍼 함수
+        def _execute_search(sources, s_query, is_isbn_mode):
+            res = []
+            titles_seen = set()
+            
+            # 워커 스레드를 할당하여 API를 동시 다발적으로 호출
             futures = {}
-            with ThreadPoolExecutor(max_workers=max(len(tasks), 1)) as executor:
-                for source_name, axis_type, func, args, axis_query in tasks:
-                    future = executor.submit(func, axis_query, *args)
-                    futures[future] = (source_name, axis_type, axis_query)
-
+            with ThreadPoolExecutor(max_workers=len(sources)) as executor:
+                for source_name, func, args in sources:
+                    if source_name != '구글' and not all(args): 
+                        continue
+                    # 비동기 백그라운드 쿼리 등록
+                    future = executor.submit(func, s_query, *args)
+                    futures[future] = source_name
+                
+                # 먼저 완성되는 결과부터 실시간 데이터 정합성 검증 적용
                 for future in as_completed(futures):
-                    source_name, axis_type, axis_query = futures[future]
+                    source_name = futures[future]
                     try:
                         items = future.result()
-                    except Exception as e:
-                        print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}:{axis_query!r}) 호출 실패: {e}")
+                    except Exception:
                         continue
-
-                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}:{axis_query!r}) 원본 결과 {len(items)}건 수신")
-
-                    kept_count = 0
-                    skipped_author_titles = []
+                    
                     for item in items:
-                        if axis_type == 'isbn':
+                        if is_isbn_mode:
                             item_isbn = item.get('isbn', '')
-                            if not compare_isbns(axis_query, item_isbn):
+                            if not compare_isbns(s_query, item_isbn):
                                 continue
-
+                        
                         original_title = item.get('title', '')
-                        if not original_title:
-                            continue
-                        if axis_type == 'title' and strict_match and norm_query:
+                        if not is_isbn_mode and strict_match and norm_query:
                             if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
                                 continue
 
-                        # 저자 축(author axis)으로 찾은 결과는 저자만 같고 책 제목은 전혀 다른
-                        # "동명 저자의 다른 책"이 섞여 들어오기 쉬우므로, 찾고 있는 책 제목과
-                        # 너무 동떨어진 제목은 결과에서 제외한다.
-                        if axis_type == 'author' and title_query:
-                            if not _title_similar(original_title, title_query):
-                                if len(skipped_author_titles) < 8:
-                                    skipped_author_titles.append(original_title)
-                                continue
+                        norm = "".join(re.findall(r'\w+', original_title)).lower()
+                        if norm and norm not in titles_seen:
+                            item['cover'] = get_high_res_url(item.get('cover'), source_name)
+                            
+                            formatted_date = format_date(item.get('pubDate'))
+                            isbn = item.get('isbn', '')
+                            if isbn:
+                                item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
+                            else:
+                                item['pubDate'] = formatted_date
+                            
+                            # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
+                            if is_isbn_mode:
+                                if detection_source == "INPUT":
+                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                                elif detection_source == "DB":
+                                    item['title'] = f"[{source_name}/DB] {original_title} *"
+                                elif detection_source == "LOCAL":
+                                    item['title'] = f"[{source_name}/LOCAL] {original_title} *"
+                                elif detection_source == "AI":
+                                    item['title'] = f"[{source_name}/AI] {original_title} *"
+                                else:
+                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                            else:
+                                item['title'] = f"[{source_name}] {original_title}"
+                            
+                            item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
 
-                        all_items.append(item)
-                        kept_count += 1
-
-                    skip_note = ""
-                    if skipped_author_titles:
-                        skip_note = f" | 저자축 유사도 필터로 제외된 제목 예시={skipped_author_titles}"
-                    print(f"[UnifiedBook] [3단계:API 병렬 호출] {source_name}({axis_type}) 필터 통과 {kept_count}/{len(items)}건{skip_note}")
-
-            print(f"[UnifiedBook] [3단계:API 병렬 호출] 전체 소스x축 합산 원본 아이템 {len(all_items)}건")
-
-            if not all_items:
-                print("[UnifiedBook] [4단계:메타데이터 합성] 수집된 아이템이 없어 종료")
-                return []
-
-            # 2) [메타데이터 합성 및 정렬] 같은 책을 가리키는 결과들을 그룹으로 묶고,
-            #    표지/서지정보 모두 알라딘 > 국립중앙도서관 > 네이버 > 구글 순으로 합성
-            cover_priority_order = INFO_PRIORITY
-
-            groups = _group_items(all_items)
-            print(f"[UnifiedBook] [4단계:메타데이터 합성] {len(all_items)}건 -> {len(groups)}개 그룹으로 병합 "
-                  f"(표지 우선순위={cover_priority_order}, 서지 우선순위={INFO_PRIORITY})")
-
-            res = []
-            for g_idx, g in enumerate(groups):
-                sources_in_group = sorted({it.get('source') for it in g['items']})
-                merged = _merge_group(g["items"], cover_priority_order, INFO_PRIORITY)
-                if not merged.get("title"):
-                    continue
-                print(f"[UnifiedBook] [4단계:메타데이터 합성] 그룹[{g_idx}] 제목={merged.get('title')!r} "
-                      f"참여소스={sources_in_group} -> 채택 소스 조합={merged.get('source')!r}")
-
-                formatted_date = format_date(merged.get('pubDate'))
-                isbn = merged.get('isbn', '')
-                if isbn:
-                    merged['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
-                else:
-                    merged['pubDate'] = formatted_date
-
-                label = merged.get('source', '') or "출처 미상"
-                original_title = merged.get('title', '')
-                item_isbn_clean = re.sub(r'[^0-9X]', '', str(isbn or '').upper())
-                is_isbn_match = has_isbn and item_isbn_clean and compare_isbns(search_query, item_isbn_clean)
-
-                # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
-                if is_isbn_match:
-                    if detection_source == "INPUT":
-                        merged['title'] = f"[{label}/ISBN] {original_title} *"
-                    elif detection_source == "DB":
-                        merged['title'] = f"[{label}/DB] {original_title} *"
-                    elif detection_source == "LOCAL":
-                        merged['title'] = f"[{label}/LOCAL] {original_title} *"
-                    elif detection_source == "AI":
-                        merged['title'] = f"[{label}/AI] {original_title} *"
-                    elif detection_source == "LINK":
-                        merged['title'] = f"[{label}/LINK] {original_title} *"
-                    else:
-                        merged['title'] = f"[{label}/ISBN] {original_title} *"
-                else:
-                    merged['title'] = f"[{label}] {original_title}"
-
-                merged['description'] = re.sub(r'^\[.*?\]\s*', '', merged.get('description', '')) if merged.get('description') else ''
-                merged['_isbn_match'] = is_isbn_match
-                merged.pop('_sources', None)
-                res.append(merged)
-
-            # 3) 정렬 우선순위: ISBN 일치 그룹 우선 -> 그다음 책 제목 완전일치 순
-            def _sort_key(it):
-                isbn_rank = 0 if it.pop('_isbn_match', False) else 1
-                title_rank = 0 if norm_query and norm_query == _normalize_title(re.sub(r'^\[.*?\]\s*', '', it.get('title', ''))) else 1
-                return (isbn_rank, title_rank)
-            res.sort(key=_sort_key)
-            print(f"[UnifiedBook] [4단계:메타데이터 합성] 정렬 적용 (ISBN 일치 우선 -> 제목 완전일치 우선, 기준어={norm_query!r})")
-
-            print(f"[UnifiedBook] [4단계:메타데이터 합성] 최종 결과 {len(res)}건 반환")
+                            res.append(item)
+                            titles_seen.add(norm)
             return res
 
-        results = _execute_search(axes, has_isbn=is_isbn)
+        results = []
 
-        print(f"[UnifiedBook] ===== 검색 종료 | 최종 반환 {len(results)}건 =====")
+        # 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
+        if is_isbn:
+            sources_isbn = [
+                ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
+                ('네이버', search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
+            ]
+            results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
+
+        # 2차 백업 검색 (Fallback):
+        # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원래 책 제목 검색으로 Fallback 전환
+        if not results:
+            sources_title = [
+                ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
+                ('네이버', search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
+            ]
+            results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
+
         return results
 
     def apply(self, db_type, book_id, item_data):
-        print(f"[UnifiedBook] [5단계:저장] apply 호출 | book_id={book_id!r} title={item_data.get('title')!r} source={item_data.get('source')!r}")
         if Image is None:
-            print("[UnifiedBook] [5단계:저장] Pillow(PIL) 미설치로 저장 중단")
             return False, "Pillow 라이브러리가 필요합니다."
-
+            
         gateway = self.get_db_gateway(db_type)
+        config = self.get_plugin_config(db_type, default={})
+        # 설정 화면에서 선택된 DB 엔진 (기본값: sqlite)
+        db_engine = (config.get("DB_TYPE") or "sqlite").strip().lower()
+
         try:
-            book = gateway.fetch_one("SELECT file_path, library_id, title, metadata_locked FROM books WHERE id = ?", (book_id,))
+            book = gateway.fetch_one("SELECT file_path, library_id FROM books WHERE id = ?", (book_id,))
             if not book:
-                print(f"[UnifiedBook] [5단계:저장] book_id={book_id} 에 해당하는 도서를 찾지 못함")
                 return False, "도서를 찾을 수 없습니다."
 
-            is_locked = parse_bool(get_row_val(book, 'metadata_locked'), default=False)
-            if is_locked:
-                print(f"[UnifiedBook] [5단계:저장] book_id={book_id} 는 metadata_locked=1 이지만 강제 저장 진행")
-
-            existing_title = get_row_val(book, 'title') or ''
             file_path = get_row_val(book, 'file_path')
             library_id = get_row_val(book, 'library_id')
             cover_url, cover_filename = item_data.get('cover'), None
 
             if cover_url:
-                print(f"[UnifiedBook] [5단계:저장] 표지 다운로드 시작: {cover_url}")
                 try:
                     import os
                     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -697,16 +272,13 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     book_hash = hashlib.md5(os.path.basename(file_path).encode('utf-8')).hexdigest()
                     cover_filename = f"book_{book_hash}.webp"
                     dest_path = os.path.join(covers_dir, cover_filename)
-
+                    
                     req = urllib.request.Request(cover_url, headers={'User-Agent': 'Mozilla/5.0'})
                     with urllib.request.urlopen(req, timeout=15) as response:
                         with Image.open(io.BytesIO(response.read())) as img:
                             img.save(dest_path, "WEBP", quality=95)
                     cover_filename = f"{library_id}/{cover_filename}"
-                    print(f"[UnifiedBook] [5단계:저장] 표지 저장 완료: {cover_filename}")
-                except Exception as e:
-                    print(f"[UnifiedBook] [5단계:저장] 표지 저장 실패: {e}")
-                    cover_filename = None
+                except: cover_filename = None
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
             pub_date_raw = item_data.get('pubDate', '')
@@ -718,17 +290,6 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             if not clean_title:
                 clean_title = raw_title
 
-            # 기존 title과 새로 검색된 title이 다르면, 원본 title 컬럼은 그대로 두고
-            # 검색된 제목을 title_alias(표시용 별칭)에 저장한다. 같으면 title_alias는 건드리지 않는다.
-            if existing_title and clean_title and _normalize_title(existing_title) != _normalize_title(clean_title):
-                final_title = existing_title
-                title_alias_value = clean_title
-                print(f"[UnifiedBook] [5단계:저장] 기존 title={existing_title!r} != 검색된 title={clean_title!r} "
-                      f"-> title은 유지하고 title_alias에 저장")
-            else:
-                final_title = clean_title
-                title_alias_value = ''
-
             # ISBN 표준화 (특수 문자 및 하이픈 제거 후 대문자 X 정렬)
             raw_isbn = item_data.get('isbn', '')
             clean_isbn = re.sub(r'[^0-9X]', '', str(raw_isbn).upper()) if raw_isbn else ''
@@ -737,8 +298,15 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             final_summary = re.sub('<[^<]+?>', '', item_data.get('description', ''))
 
             # 안전 조치: DB 테이블 정보 조회하여 'isbn' 컬럼 존재 여부 동적 체크
-            columns_info = gateway.fetch_all("PRAGMA table_info(books)")
-            columns = [col['name'].lower() for col in columns_info] if columns_info else []
+            # (설정된 DB 유형에 따라 조회 구문/결과 컬럼 키가 다르므로 분기 처리)
+            if db_engine == "mariadb":
+                # MariaDB는 PRAGMA를 지원하지 않으므로 SHOW COLUMNS 사용, 결과 키는 'Field'
+                columns_info = gateway.fetch_all("SHOW COLUMNS FROM books")
+                columns = [col['Field'].lower() for col in columns_info] if columns_info else []
+            else:
+                # SQLite: 기존 PRAGMA 방식, 결과 키는 'name'
+                columns_info = gateway.fetch_all("PRAGMA table_info(books)")
+                columns = [col['name'].lower() for col in columns_info] if columns_info else []
             has_isbn_column = 'isbn' in columns
 
             # CASE WHEN 조건문을 적용하여, 새로운 커버 이미지가 실제로 성공적으로 반영되었을 때만 cover_updated_at 갱신
@@ -746,28 +314,41 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 gateway.execute(
                     """UPDATE books SET title = ?, author = ?, publisher = ?, summary = ?, link = ?, 
                        release_date = ?, isbn = COALESCE(NULLIF(?, ''), isbn), cover_image = COALESCE(NULLIF(?, ''), cover_image),
-                       title_alias = COALESCE(NULLIF(?, ''), title_alias),
                        cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
                        WHERE id = ?""",
-                    (final_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, title_alias_value,
-                     cover_filename, cover_filename, book_id)
+                    (clean_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
+                     item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, cover_filename, cover_filename, book_id)
                 )
             else:
                 gateway.execute(
                     """UPDATE books SET title = ?, author = ?, publisher = ?, summary = ?, link = ?, 
                        release_date = ?, cover_image = COALESCE(NULLIF(?, ''), cover_image),
-                       title_alias = COALESCE(NULLIF(?, ''), title_alias),
                        cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
                        WHERE id = ?""",
-                    (final_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, cover_filename, title_alias_value,
-                     cover_filename, cover_filename, book_id)
+                    (clean_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
+                     item_data.get('link'), clean_pub_date, cover_filename, cover_filename, cover_filename, book_id)
                 )
-
-            print(f"[UnifiedBook] [5단계:저장] books 테이블 UPDATE 실행 (title={final_title!r}, title_alias={title_alias_value!r}, isbn컬럼존재={has_isbn_column}, 강제저장={is_locked})")
 
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
         except Exception as e:
-            print(f"[UnifiedBook] [5단계:저장] 저장 중 예외 발생: {e}")
             return False, f"적용 오류: {str(e)}"
+
+    def get_context_menu_items(self, db_type, context):
+        return [
+            {
+                'id': 'unified_search_link',
+                'label': '통합 검색 결과 열기',
+                'icon': 'fa-solid fa-magnifying-glass',
+            }
+        ]
+
+    def run_context_menu_action(self, db_type, action_id, context):
+        if action_id == 'unified_search_link':
+            query = context.get('book_title')
+            url = f"https://search.naver.com/search.naver?where=book&query={urllib.parse.quote(query)}"
+            return {
+                'success': True, 
+                'message': '통합 검색 페이지를 엽니다.', 
+                'open_url': url
+            }
+        return {'success': False, 'error': '알 수 없는 액션입니다.'}
