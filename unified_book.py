@@ -78,7 +78,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "show_sample_update_button": True,
     }
     config_schema = [
-        {"key": "DB_TYPE", "label": "데이터베이스 유형", "type": "radio",
+        {"key": "DB_TYPE", "label": "데이터베이스 유형", "type": "select",
          "options": [{"value": "sqlite", "label": "SQLite"}, {"value": "mariadb", "label": "MariaDB"}],
          "default": "sqlite", "required": False},
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
