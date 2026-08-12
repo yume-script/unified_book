@@ -34,7 +34,7 @@ def _import_local_module(module_name):
 # 임포트 안정성 확보 (패키지 로드 실패 시 경로 우회 동적 임포트 실행)
 try:
     from .aladin import search_aladin, search_aladin_isbn
-    from .naver import search_naver, search_naver_isbn
+    from .nlk import search_nlk, search_nlk_isbn
     from .google import search_google
     from .utils_unified import (
         format_date, get_high_res_url, validate_isbn13, validate_isbn10, 
@@ -42,14 +42,14 @@ try:
     )
 except ImportError:
     _aladin_mod = _import_local_module("aladin")
-    _naver_mod = _import_local_module("naver")
+    _nlk_mod = _import_local_module("nlk")
     _google_mod = _import_local_module("google")
     _utils_mod = _import_local_module("utils_unified")
     
     search_aladin = _aladin_mod.search_aladin
     search_aladin_isbn = _aladin_mod.search_aladin_isbn
-    search_naver = _naver_mod.search_naver
-    search_naver_isbn = _naver_mod.search_naver_isbn
+    search_nlk = _nlk_mod.search_nlk
+    search_nlk_isbn = _nlk_mod.search_nlk_isbn
     search_google = _google_mod.search_google
     
     format_date = _utils_mod.format_date
@@ -72,7 +72,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         "enabled": True,
         "provider": "github-raw",
         "raw_base_url": "https://raw.githubusercontent.com/yume-script/unified_book/refs/heads/main/",
-        "files": ["unified_book.py", "aladin.py", "naver.py", "google.py", "nlk.py", "utils_unified.py", "index.html", "style.css", "__init__.py", "VERSION"],
+        "files": ["unified_book.py", "aladin.py", "nlk.py", "google.py", "ridi.py", "kyobo.py", "yes24.py", "utils_unified.py", "settings.html", "settings.css", "__init__.py", "VERSION"],
         "version_file": "VERSION",
         "version_key": "plugin version",
         "show_sample_update_button": True,
@@ -81,9 +81,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         {"key": "DB_TYPE", "label": "데이터베이스 유형", "type": "select",
          "options": [{"value": "sqlite", "label": "SQLite"}, {"value": "mariadb", "label": "MariaDB"}],
          "default": "sqlite", "required": False},
+        {"key": "NLK_CERT_KEY", "label": "국립중앙도서관 Seoji 인증키", "type": "text", "required": False},
         {"key": "ALADIN_KEY", "label": "알라딘 TTBKey", "type": "text", "required": False},
-        {"key": "NAVER_ID", "label": "네이버 Client ID", "type": "text", "required": False},
-        {"key": "NAVER_SECRET", "label": "네이버 Client Secret", "type": "text", "required": False},
         {"key": "GOOGLE_API_KEY", "label": "Google API Key", "type": "text", "required": False},
         {"key": "GEMINI_API_KEY", "label": "Gemini/LiteLLM API Key", "type": "text", "required": False},
         {"key": "LITELLM_ENDPOINT", "label": "LiteLLM API 주소 (선택)", "type": "text", "required": False},
@@ -233,7 +232,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         if is_isbn:
             sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
-                ('네이버', search_naver_isbn, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                ('국립중앙도서관', search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
                 ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
             ]
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
@@ -243,7 +242,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         if not results:
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
-                ('네이버', search_naver, (config.get("NAVER_ID"), config.get("NAVER_SECRET"))),
+                ('국립중앙도서관', search_nlk, (config.get("NLK_CERT_KEY"),)),
                 ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
             ]
             results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
