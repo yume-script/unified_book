@@ -135,7 +135,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         if not query:
             return []
 
-        print(f"[UnifiedBook] ===== 검색 시작 | query={query!r} db_type={db_type!r} =====")
+        print(f"[UnifiedBook] ===== 검색 시작 | 검색어='{query}' =====")
 
         config = self.get_plugin_config(db_type, default={})
         strict_match = parse_bool(config.get("STRICT_MATCH", False), default=False)
@@ -160,14 +160,14 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         # 시각화 개선: ISBN 매칭이 출발한 소스 위치를 추적하기 위한 변수 정의
         detection_source = "INPUT" if is_isbn else None
 
-        print(f"[UnifiedBook] [1단계:로컬 파싱] 입력값 ISBN 여부={is_isbn} clean_query_base={clean_query_base!r}")
+        print(f"[UnifiedBook] 1단계(검색어 확인): 입력값 ISBN 여부={is_isbn} 검색어='{clean_query_base}'")
 
         # ISBN이 아닐 경우, 로컬 DB 추적 및 파일 실시간 파싱을 통한 ISBN 추적 가동
         if not is_isbn:
             gateway = self.get_db_gateway(db_type)
             
             # 가공된 clean_query_base를 사용하여 DB를 검색하므로 매칭 확률과 인덱스 속도가 대폭 향상됩니다.
-            print(f"[UnifiedBook] [2단계:DB/파일 파싱] clean_query_base={clean_query_base!r} 로 books 테이블 조회 시작")
+            print(f"[UnifiedBook] 2단계(내 서재에서 같은 책 찾기): '{clean_query_base}' 로 내 서재(DB)에서 제목 조회 시작")
             book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title = ? LIMIT 1", (clean_query_base,))
             if not book:
                 book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE file_path LIKE ? LIMIT 1", (f"%{clean_query_base}%",))
@@ -179,7 +179,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     sub_query = " ".join(words[:2])
                     book = gateway.fetch_one("SELECT file_path, isbn FROM books WHERE title LIKE ? LIMIT 1", (f"%{sub_query}%",))
 
-            print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB 매칭 도서={'있음' if book else '없음'}")
+            print(f"[UnifiedBook] 2단계(내 서재에서 같은 책 찾기): 내 서재에 같은 책이 {'있음' if book else '없음'}")
 
             if book:
                 db_isbn = get_row_val(book, 'isbn')
@@ -189,12 +189,12 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     is_isbn = True
                     search_query = clean_db_isbn
                     detection_source = "DB"  # 감지출처: 데이터베이스
-                    print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB에 저장된 ISBN 발견 -> search_query={search_query}")
+                    print(f"[UnifiedBook] 2단계(내 서재에서 같은 책 찾기): 내 서재 DB에 이미 저장된 ISBN 발견 -> {search_query}")
                 else:
                     # 파일 실시간 스캔 옵션이 켜져 있을 때만 EPUB/PDF의 무거운 헤더 디코딩을 진행함
                     if isbn_file_scan:
                         file_path = get_row_val(book, 'file_path')
-                        print(f"[UnifiedBook] [2단계:DB/파일 파싱] DB에 ISBN 없음 -> 파일 스캔 시도: {file_path!r}")
+                        print(f"[UnifiedBook] 3단계(책 파일에서 ISBN 직접 스캔): 내 서재 DB에 ISBN이 없어서 실제 책 파일을 열어 판권지를 스캔합니다: '{file_path}'")
                         extracted_isbn, method = None, None
                         if file_path and os.path.exists(file_path):
                             ext = os.path.splitext(file_path)[1].lower()
@@ -207,25 +207,26 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             is_isbn = True
                             search_query = extracted_isbn
                             detection_source = method  # 감지출처: LOCAL 또는 AI
-                            print(f"[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔으로 ISBN 추출 성공 (경로: {method}) -> {extracted_isbn}")
+                            method_desc = "AI가 판독" if method == "AI" else "텍스트 패턴(정규식)으로 직접 발견"
+                            print(f"[UnifiedBook] 3단계(책 파일에서 ISBN 직접 스캔): 파일 스캔 성공! {method_desc} -> {extracted_isbn}")
                         else:
-                            print("[UnifiedBook] [2단계:DB/파일 파싱] 파일 스캔에서도 ISBN을 찾지 못함")
+                            print("[UnifiedBook] 3단계(책 파일에서 ISBN 직접 스캔): 파일 안에서도 ISBN을 찾지 못함")
                     else:
-                        print("[UnifiedBook] [2단계:DB/파일 파싱] ISBN_FILE_SCAN 옵션 꺼짐 -> 파일 스캔 건너뜀")
+                        print("[UnifiedBook] 3단계(책 파일에서 ISBN 직접 스캔): 설정에서 파일 스캔 옵션이 꺼져 있어 건너뜀")
 
         # 내부 검색 수행 전용 헬퍼 함수
         def _execute_search(sources, s_query, is_isbn_mode):
             res = []
             titles_seen = set()
             
-            print(f"[UnifiedBook] [3단계:API 병렬 호출] 모드={'ISBN' if is_isbn_mode else '제목'} s_query={s_query!r} 대상 소스={[s[0] for s in sources]}")
+            print(f"[UnifiedBook] 5단계(서점 동시 검색): 검색어='{s_query}' ({'ISBN으로 검색' if is_isbn_mode else '제목으로 검색'}) / 대상 서점={[s[0] for s in sources]}")
 
             # 워커 스레드를 할당하여 API를 동시 다발적으로 호출
             futures = {}
             with ThreadPoolExecutor(max_workers=len(sources)) as executor:
                 for source_name, func, args in sources:
                     if source_name != '구글' and not all(args): 
-                        print(f"[UnifiedBook] [3단계:API 병렬 호출] '{source_name}' 인증키 미설정 -> 호출 건너뜀")
+                        print(f"[UnifiedBook] 5단계(서점 동시 검색): '{source_name}' 인증키가 설정 안 되어 있어 건너뜀")
                         continue
                     # 비동기 백그라운드 쿼리 등록
                     future = executor.submit(func, s_query, *args)
@@ -238,10 +239,10 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         items = future.result()
                     except Exception as e:
                         logger.warning("[통합 도서 검색] '%s' 소스 조회 실패: %s", source_name, e)
-                        print(f"[UnifiedBook] [3단계:API 병렬 호출] '{source_name}' 호출 실패: {e}")
+                        print(f"[UnifiedBook] 5단계(서점 동시 검색): '{source_name}' 요청 실패: {e}")
                         continue
 
-                    print(f"[UnifiedBook] [3단계:API 병렬 호출] '{source_name}' 원본 결과 {len(items)}건 수신")
+                    print(f"[UnifiedBook] 5단계(서점 동시 검색): '{source_name}'에서 {len(items)}건 응답 받음")
                     kept_count = 0
                     for item in items:
                         if is_isbn_mode:
@@ -285,16 +286,16 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             res.append(item)
                             titles_seen.add(norm)
                             kept_count += 1
-                    print(f"[UnifiedBook] [3단계:API 병렬 호출] '{source_name}' 필터/중복제거 통과 {kept_count}/{len(items)}건")
+                    print(f"[UnifiedBook] 5단계(서점 동시 검색): '{source_name}' 결과 중 {kept_count}/{len(items)}건이 최종 채택됨(중복/필터 제외)")
 
-            print(f"[UnifiedBook] [3단계:API 병렬 호출] 전체 소스 합산 최종 아이템 {len(res)}건")
+            print(f"[UnifiedBook] 5단계(서점 동시 검색): 모든 서점 합산 최종 {len(res)}건")
             return res
 
         results = []
 
         # 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
         if is_isbn:
-            print(f"[UnifiedBook] [2단계:정본 조회] ISBN 확정 (감지출처={detection_source}) -> 알라딘/국립중앙도서관/구글 ISBN 조회 시작: {search_query}")
+            print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): ISBN 확정됨(찾은 경로={detection_source}) -> 국립중앙도서관/알라딘/구글로 정확한 서지정보부터 조회: {search_query}")
             sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
                 ('국립중앙도서관', search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
@@ -303,12 +304,12 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 ('리디북스', search_ridi_isbn, ())
             ]
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
-            print(f"[UnifiedBook] [2단계:정본 조회] ISBN 조회 결과 {len(results)}건")
+            print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): ISBN으로 찾은 결과 {len(results)}건")
 
         # 2차 백업 검색 (Fallback):
         # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원래 책 제목 검색으로 Fallback 전환
         if not results:
-            print(f"[UnifiedBook] [2단계:백업 검색] ISBN 결과 없음 -> 제목 검색으로 폴백: {clean_query_base!r}")
+            print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): ISBN으로는 결과가 없어서 제목 검색으로 전환: '{clean_query_base}'")
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
                 ('국립중앙도서관', search_nlk, (config.get("NLK_CERT_KEY"),)),
@@ -318,14 +319,14 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             ]
             results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
 
-        print(f"[UnifiedBook] ===== 검색 종료 | 최종 반환 {len(results)}건 =====")
+        print(f"[UnifiedBook] ===== 검색 종료 | 최종 {len(results)}건 반환 =====")
         return results
 
     def apply(self, db_type, book_id, item_data):
-        print(f"[UnifiedBook] [4단계:저장] apply 호출 | book_id={book_id!r} title={item_data.get('title')!r} source={item_data.get('source')!r}")
+        print(f"[UnifiedBook] 6단계(내 서재에 저장): 선택한 검색결과 저장 시작 | book_id={book_id!r} 제목={item_data.get('title')!r} 출처={item_data.get('source')!r}")
 
         if Image is None:
-            print("[UnifiedBook] [4단계:저장] Pillow(PIL) 미설치로 저장 중단")
+            print("[UnifiedBook] 6단계(내 서재에 저장): Pillow(PIL) 라이브러리 미설치로 저장 중단")
             return False, "Pillow 라이브러리가 필요합니다."
             
         gateway = self.get_db_gateway(db_type)
@@ -336,7 +337,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
         try:
             book = gateway.fetch_one("SELECT file_path, library_id FROM books WHERE id = ?", (book_id,))
             if not book:
-                print(f"[UnifiedBook] [4단계:저장] book_id={book_id} 에 해당하는 도서를 찾지 못함")
+                print(f"[UnifiedBook] 6단계(내 서재에 저장): book_id={book_id} 에 해당하는 도서를 내 서재에서 찾지 못함")
                 return False, "도서를 찾을 수 없습니다."
 
             file_path = get_row_val(book, 'file_path')
@@ -365,12 +366,12 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     columns = []
             has_isbn_column = 'isbn' in columns
             has_title_alias_column = 'title_alias' in columns
-            print(f"[UnifiedBook] [4단계:저장] books 컬럼 확인: isbn={has_isbn_column} title_alias={has_title_alias_column}")
+            print(f"[UnifiedBook] 6단계(내 서재에 저장): DB 컬럼 확인 결과 - isbn 컬럼 있음={has_isbn_column}, title_alias(별칭) 컬럼 있음={has_title_alias_column}")
 
             cover_url, cover_filename = item_data.get('cover'), None
 
             if cover_url:
-                print(f"[UnifiedBook] [4단계:저장] 표지 다운로드 시작: {cover_url}")
+                print(f"[UnifiedBook] 6단계(내 서재에 저장): 표지 이미지 다운로드 시작: {cover_url}")
                 try:
                     import os
                     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -385,10 +386,10 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         with Image.open(io.BytesIO(response.read())) as img:
                             img.save(dest_path, "WEBP", quality=95)
                     cover_filename = f"{library_id}/{cover_filename}"
-                    print(f"[UnifiedBook] [4단계:저장] 표지 저장 완료: {cover_filename}")
+                    print(f"[UnifiedBook] 6단계(내 서재에 저장): 표지 이미지 저장 완료: {cover_filename}")
                 except Exception as e:
                     logger.warning("[통합 도서 검색] 표지 이미지 다운로드/저장 실패 (book_id=%s): %s", book_id, e)
-                    print(f"[UnifiedBook] [4단계:저장] 표지 저장 실패: {e}")
+                    print(f"[UnifiedBook] 6단계(내 서재에 저장): 표지 이미지 저장 실패: {e}")
                     cover_filename = None
 
             # DB 저장용 정리 (UI용으로 임시 처리했던 ' | ISBN: ...' 및 별표(*) 정제)
@@ -420,8 +421,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 if existing_title and clean_title and _normalize_title(existing_title) != _normalize_title(clean_title):
                     final_title = existing_title
                     title_alias_value = clean_title
-                    print(f"[UnifiedBook] [4단계:저장] 기존 title={existing_title!r} != 검색된 title={clean_title!r} "
-                          f"-> title은 유지하고 title_alias에 저장")
+                    print(f"[UnifiedBook] 6단계(내 서재에 저장): 기존 제목={existing_title!r} 과 새로 검색된 제목={clean_title!r} 이 달라서 "
+                          f"-> 기존 제목은 그대로 두고, 새 제목은 title_alias(별칭)에 저장")
 
             # 동적으로 UPDATE SET 절 구성 (isbn/title_alias는 컬럼이 실제로 있을 때만 포함)
             set_parts = ["title = ?", "author = ?", "publisher = ?", "summary = ?", "link = ?", "release_date = ?"]
@@ -445,12 +446,12 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             sql = "UPDATE books SET " + ", ".join(set_parts) + " WHERE id = ?"
             gateway.execute(sql, tuple(params))
 
-            print(f"[UnifiedBook] [4단계:저장] books 테이블 UPDATE 완료 (book_id={book_id}, title={final_title!r}, "
-                  f"title_alias={title_alias_value!r}, isbn컬럼존재={has_isbn_column}, title_alias컬럼존재={has_title_alias_column})")
+            print(f"[UnifiedBook] 6단계(내 서재에 저장): 내 서재 DB 저장 완료 (book_id={book_id}, 제목={final_title!r}, "
+                  f"별칭={title_alias_value!r})")
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
         except Exception as e:
             logger.error("[통합 도서 검색] apply() 처리 중 오류 (book_id=%s): %s\n%s", book_id, e, traceback.format_exc())
-            print(f"[UnifiedBook] [4단계:저장] 저장 중 예외 발생 (book_id={book_id}): {e}")
+            print(f"[UnifiedBook] 6단계(내 서재에 저장): 저장 중 오류 발생 (book_id={book_id}): {e}")
             return False, f"적용 오류: {str(e)}"
 
     #def get_context_menu_items(self, db_type, context):
