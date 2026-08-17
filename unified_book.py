@@ -21,6 +21,11 @@ from plugins.metadata.base import BaseMetadataProvider
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_title(title):
+    """제목 비교용 정규화: 공백/기호 제거 후 소문자 변환 (title_alias 분기 판단에 사용)"""
+    return "".join(re.findall(r"\w+", title or "")).lower()
+
 # 임포트 섀도잉(Import Shadowing) 원천 차단 및 새로운 utils_unified 동적 로드 지원
 def _import_local_module(module_name):
     import importlib.util
@@ -336,6 +341,32 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
             file_path = get_row_val(book, 'file_path')
             library_id = get_row_val(book, 'library_id')
+
+            # 안전 조치: DB 테이블 정보 조회하여 'isbn'/'title_alias' 등 선택적 컬럼 존재 여부 동적 체크
+            # 설정의 DB_TYPE 값을 우선 참고하되, 실제 게이트웨이가 다른 엔진일 수 있으므로
+            # 첫 시도가 실패하면 반대 방식으로 자동 폴백한다 (라이브러리별로 엔진이 섞여 있는 경우 대비)
+            def _try_pragma():
+                info = gateway.fetch_all("PRAGMA table_info(books)")
+                return [col['name'].lower() for col in info] if info else []
+
+            def _try_show_columns():
+                info = gateway.fetch_all("SHOW COLUMNS FROM books")
+                return [col['Field'].lower() for col in info] if info else []
+
+            primary, fallback = (_try_show_columns, _try_pragma) if db_engine == "mariadb" else (_try_pragma, _try_show_columns)
+            try:
+                columns = primary()
+            except Exception as e:
+                logger.warning("[통합 도서 검색] 컬럼 조회 1차 시도 실패(설정: %s), 다른 방식으로 재시도합니다: %s", db_engine, e)
+                try:
+                    columns = fallback()
+                except Exception as e2:
+                    logger.error("[통합 도서 검색] 컬럼 조회 최종 실패 (book_id=%s): %s", book_id, e2)
+                    columns = []
+            has_isbn_column = 'isbn' in columns
+            has_title_alias_column = 'title_alias' in columns
+            print(f"[UnifiedBook] [4단계:저장] books 컬럼 확인: isbn={has_isbn_column} title_alias={has_title_alias_column}")
+
             cover_url, cover_filename = item_data.get('cover'), None
 
             if cover_url:
@@ -377,50 +408,45 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             # 본문 가공 제거를 위한 클리닝
             final_summary = re.sub('<[^<]+?>', '', item_data.get('description', ''))
 
-            # 안전 조치: DB 테이블 정보 조회하여 'isbn' 컬럼 존재 여부 동적 체크
-            # 설정의 DB_TYPE 값을 우선 참고하되, 실제 게이트웨이가 다른 엔진일 수 있으므로
-            # 첫 시도가 실패하면 반대 방식으로 자동 폴백한다 (라이브러리별로 엔진이 섞여 있는 경우 대비)
-            def _try_pragma():
-                info = gateway.fetch_all("PRAGMA table_info(books)")
-                return [col['name'].lower() for col in info] if info else []
+            # 🏷️ title_alias 보호 저장: title_alias 컬럼이 실제로 존재하고, 기존 DB의 title과
+            # 새로 검색된 title이 (정규화 기준으로) 다르면 원본 title 컬럼은 건드리지 않고
+            # 새 제목을 title_alias(표시용 별칭)에 저장한다. 파일명 유래 title을 함부로
+            # 덮어쓰지 않기 위함. 같거나(또는 title_alias 컬럼이 없으면) title을 그대로 갱신한다.
+            final_title = clean_title
+            title_alias_value = ''
+            if has_title_alias_column:
+                existing = gateway.fetch_one("SELECT title FROM books WHERE id = ?", (book_id,))
+                existing_title = get_row_val(existing, 'title') if existing else ''
+                if existing_title and clean_title and _normalize_title(existing_title) != _normalize_title(clean_title):
+                    final_title = existing_title
+                    title_alias_value = clean_title
+                    print(f"[UnifiedBook] [4단계:저장] 기존 title={existing_title!r} != 검색된 title={clean_title!r} "
+                          f"-> title은 유지하고 title_alias에 저장")
 
-            def _try_show_columns():
-                info = gateway.fetch_all("SHOW COLUMNS FROM books")
-                return [col['Field'].lower() for col in info] if info else []
+            # 동적으로 UPDATE SET 절 구성 (isbn/title_alias는 컬럼이 실제로 있을 때만 포함)
+            set_parts = ["title = ?", "author = ?", "publisher = ?", "summary = ?", "link = ?", "release_date = ?"]
+            params = [final_title, item_data.get('author'), item_data.get('publisher'), final_summary,
+                      item_data.get('link'), clean_pub_date]
 
-            primary, fallback = (_try_show_columns, _try_pragma) if db_engine == "mariadb" else (_try_pragma, _try_show_columns)
-            try:
-                columns = primary()
-            except Exception as e:
-                logger.warning("[통합 도서 검색] 컬럼 조회 1차 시도 실패(설정: %s), 다른 방식으로 재시도합니다: %s", db_engine, e)
-                try:
-                    columns = fallback()
-                except Exception as e2:
-                    logger.error("[통합 도서 검색] 컬럼 조회 최종 실패 (book_id=%s): %s", book_id, e2)
-                    columns = []
-            has_isbn_column = 'isbn' in columns
-
-            # CASE WHEN 조건문을 적용하여, 새로운 커버 이미지가 실제로 성공적으로 반영되었을 때만 cover_updated_at 갱신
             if has_isbn_column:
-                gateway.execute(
-                    """UPDATE books SET title = ?, author = ?, publisher = ?, summary = ?, link = ?, 
-                       release_date = ?, isbn = COALESCE(NULLIF(?, ''), isbn), cover_image = COALESCE(NULLIF(?, ''), cover_image),
-                       cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
-                       WHERE id = ?""",
-                    (clean_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, clean_isbn, cover_filename, cover_filename, cover_filename, book_id)
-                )
-            else:
-                gateway.execute(
-                    """UPDATE books SET title = ?, author = ?, publisher = ?, summary = ?, link = ?, 
-                       release_date = ?, cover_image = COALESCE(NULLIF(?, ''), cover_image),
-                       cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END
-                       WHERE id = ?""",
-                    (clean_title, item_data.get('author'), item_data.get('publisher'), final_summary, 
-                     item_data.get('link'), clean_pub_date, cover_filename, cover_filename, cover_filename, book_id)
-                )
+                set_parts.append("isbn = COALESCE(NULLIF(?, ''), isbn)")
+                params.append(clean_isbn)
 
-            print(f"[UnifiedBook] [4단계:저장] books 테이블 UPDATE 완료 (book_id={book_id}, title={clean_title!r}, isbn컬럼존재={has_isbn_column})")
+            if has_title_alias_column:
+                set_parts.append("title_alias = COALESCE(NULLIF(?, ''), title_alias)")
+                params.append(title_alias_value)
+
+            set_parts.append("cover_image = COALESCE(NULLIF(?, ''), cover_image)")
+            params.append(cover_filename)
+            set_parts.append("cover_updated_at = CASE WHEN ? IS NOT NULL AND ? != '' THEN CURRENT_TIMESTAMP ELSE cover_updated_at END")
+            params.extend([cover_filename, cover_filename])
+
+            params.append(book_id)
+            sql = "UPDATE books SET " + ", ".join(set_parts) + " WHERE id = ?"
+            gateway.execute(sql, tuple(params))
+
+            print(f"[UnifiedBook] [4단계:저장] books 테이블 UPDATE 완료 (book_id={book_id}, title={final_title!r}, "
+                  f"title_alias={title_alias_value!r}, isbn컬럼존재={has_isbn_column}, title_alias컬럼존재={has_title_alias_column})")
             return True, f"[{item_data.get('source')}] 정보가 성공적으로 적용되었습니다."
         except Exception as e:
             logger.error("[통합 도서 검색] apply() 처리 중 오류 (book_id=%s): %s\n%s", book_id, e, traceback.format_exc())
