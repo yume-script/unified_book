@@ -26,6 +26,27 @@ def _normalize_title(title):
     """제목 비교용 정규화: 공백/기호 제거 후 소문자 변환 (title_alias 분기 판단에 사용)"""
     return "".join(re.findall(r"\w+", title or "")).lower()
 
+
+def _normalize_author(author_str):
+    """저자 비교용 정규화: 쉼표/슬래시 등으로 구분된 저자명을 각각 정규화한 집합으로 변환.
+    "홍길동, 김철수" 처럼 공저이거나 "홍길동(지은이)/이영희(옮김)" 처럼 역할이 붙는 경우를 고려한다."""
+    if not author_str:
+        return set()
+    parts = re.split(r'[,;/·]', str(author_str))
+    return {"".join(re.findall(r'\w+', p)).lower() for p in parts if p.strip()}
+
+
+def _authors_match(reference_author, candidate_author):
+    """도서 결정 로직(제목+저자 검색)에서 저자 일치 여부 판정.
+    정규화된 저자 집합끼리 하나라도 겹치거나 포함관계면 일치로 인정한다(완전일치+포함관계).
+    둘 중 하나라도 저자 정보가 비어 있으면 판정 불가로 보고 불일치(False) 처리한다."""
+    ref_set, cand_set = _normalize_author(reference_author), _normalize_author(candidate_author)
+    if not ref_set or not cand_set:
+        return False
+    if ref_set & cand_set:
+        return True
+    return any(x in y or y in x for x in ref_set for y in cand_set)
+
 # 임포트 섀도잉(Import Shadowing) 원천 차단 및 새로운 utils_unified 동적 로드 지원
 def _import_local_module(module_name):
     import importlib.util
@@ -215,11 +236,19 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                         print("[UnifiedBook] 3단계(책 파일에서 ISBN 직접 스캔): 설정에서 파일 스캔 옵션이 꺼져 있어 건너뜀")
 
         # 내부 검색 수행 전용 헬퍼 함수
-        def _execute_search(sources, s_query, is_isbn_mode):
-            res = []
-            titles_seen = set()
-            
+        # source_order: 최종 결과를 이 순서대로 정렬 (API 응답 도착 순서가 아니라 지정된 서점 우선순위)
+        # author_filter: 지정되면, 이 저자와 일치하지 않는 도서는 결과에서 제외 (ISBN 없는 상태의 "제목+저자 검색"용)
+        def _execute_search(sources, s_query, is_isbn_mode, source_order, author_filter=None):
+            # ⚠️ 중복 제목 제거는 API 응답 도착 순서가 아니라, source_order 우선순위로 정렬한
+            # *다음에* 수행한다. 도착 순서로 먼저 제거해버리면 낮은 우선순위 소스가 먼저 응답했을 때
+            # 그 항목이 자리를 차지해버려서, 나중에 도착한 더 높은 우선순위 소스(예: 알라딘)의
+            # 동일 제목 항목이 "중복"으로 걸러지는 문제가 생긴다 (우선순위가 사실상 무의미해짐).
+            candidates = []  # (정렬용 순위, 중복판정용 정규화 제목, item)
+            order_index = {name: i for i, name in enumerate(source_order)}
+
             print(f"[UnifiedBook] 5단계(서점 동시 검색): 검색어='{s_query}' ({'ISBN으로 검색' if is_isbn_mode else '제목으로 검색'}) / 대상 서점={[s[0] for s in sources]}")
+            if author_filter:
+                print(f"[UnifiedBook] 5단계(서점 동시 검색): 기준 저자='{author_filter}' 와 일치하지 않는 도서는 제외합니다")
 
             # 워커 스레드를 할당하여 API를 동시 다발적으로 호출
             futures = {}
@@ -232,7 +261,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                     future = executor.submit(func, s_query, *args)
                     futures[future] = source_name
                 
-                # 먼저 완성되는 결과부터 실시간 데이터 정합성 검증 적용
+                # 먼저 완성되는 결과부터 처리하지만, 최종 채택/중복제거는 뒤에서 우선순위 기준으로 다시 함
                 for future in as_completed(futures):
                     source_name = futures[future]
                     try:
@@ -244,6 +273,7 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
 
                     print(f"[UnifiedBook] 5단계(서점 동시 검색): '{source_name}'에서 {len(items)}건 응답 받음")
                     kept_count = 0
+                    excluded_by_author = 0
                     for item in items:
                         if is_isbn_mode:
                             item_isbn = item.get('isbn', '')
@@ -255,69 +285,124 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                             if norm_query not in "".join(re.findall(r'\w+', original_title.replace('_', ''))).lower():
                                 continue
 
+                        # 저자 필터: 기준 저자와 일치하지 않으면 제외 (ISBN 없는 상태에서만 적용됨)
+                        if author_filter:
+                            if not _authors_match(author_filter, item.get('author', '')):
+                                excluded_by_author += 1
+                                continue
+
                         norm = "".join(re.findall(r'\w+', original_title)).lower()
-                        if norm and norm not in titles_seen:
-                            item['cover'] = get_high_res_url(item.get('cover'), source_name)
-                            
-                            formatted_date = format_date(item.get('pubDate'))
-                            isbn = item.get('isbn', '')
-                            if isbn:
-                                item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
-                            else:
-                                item['pubDate'] = formatted_date
-                            
-                            # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
-                            if is_isbn_mode:
-                                if detection_source == "INPUT":
-                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
-                                elif detection_source == "DB":
-                                    item['title'] = f"[{source_name}/DB] {original_title} *"
-                                elif detection_source == "LOCAL":
-                                    item['title'] = f"[{source_name}/LOCAL] {original_title} *"
-                                elif detection_source == "AI":
-                                    item['title'] = f"[{source_name}/AI] {original_title} *"
-                                else:
-                                    item['title'] = f"[{source_name}/ISBN] {original_title} *"
-                            else:
-                                item['title'] = f"[{source_name}] {original_title}"
-                            
-                            item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
+                        if not norm:
+                            continue
 
-                            res.append(item)
-                            titles_seen.add(norm)
-                            kept_count += 1
-                    print(f"[UnifiedBook] 5단계(서점 동시 검색): '{source_name}' 결과 중 {kept_count}/{len(items)}건이 최종 채택됨(중복/필터 제외)")
+                        item['cover'] = get_high_res_url(item.get('cover'), source_name)
 
-            print(f"[UnifiedBook] 5단계(서점 동시 검색): 모든 서점 합산 최종 {len(res)}건")
+                        formatted_date = format_date(item.get('pubDate'))
+                        isbn = item.get('isbn', '')
+                        if isbn:
+                            item['pubDate'] = f"{formatted_date} | ISBN: {isbn}"
+                        else:
+                            item['pubDate'] = formatted_date
+
+                        # 💡 피드백 반영: 깔끔한 출처 레이블과 매칭 표시용 별표(*)만 타이틀 끝에 부여하도록 정리
+                        if is_isbn_mode:
+                            if detection_source == "INPUT":
+                                item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                            elif detection_source == "DB":
+                                item['title'] = f"[{source_name}/DB] {original_title} *"
+                            elif detection_source == "LOCAL":
+                                item['title'] = f"[{source_name}/LOCAL] {original_title} *"
+                            elif detection_source == "AI":
+                                item['title'] = f"[{source_name}/AI] {original_title} *"
+                            else:
+                                item['title'] = f"[{source_name}/ISBN] {original_title} *"
+                        else:
+                            item['title'] = f"[{source_name}] {original_title}"
+
+                        item['description'] = re.sub(r'^\[.*?\]\s*', '', item.get('description', '')) if 'description' in item else ''
+
+                        candidates.append((order_index.get(source_name, 999), norm, item))
+                        kept_count += 1
+                    if author_filter and excluded_by_author:
+                        print(f"[UnifiedBook] 5단계(서점 동시 검색): '{source_name}' 저자 불일치로 {excluded_by_author}건 제외")
+                    print(f"[UnifiedBook] 5단계(서점 동시 검색): '{source_name}' 응답 중 {kept_count}/{len(items)}건이 필터 통과 (최종 중복제거 전)")
+
+            # 지정된 서점 우선순위(source_order)로 먼저 정렬한 뒤, 그 순서 그대로 중복 제목을 제거한다.
+            # -> 동일한 책이 여러 소스에서 나오면, 우선순위가 더 높은 소스의 항목이 항상 채택된다.
+            candidates.sort(key=lambda c: c[0])
+            res = []
+            titles_seen = set()
+            for _, norm, item in candidates:
+                if norm in titles_seen:
+                    continue
+                titles_seen.add(norm)
+                res.append(item)
+
+            print(f"[UnifiedBook] 5단계(서점 동시 검색): 모든 서점 합산 최종 {len(res)}건 (정렬 순서: {' → '.join(source_order)})")
             return res
 
         results = []
 
         # 1차 검색: ISBN이 확인된 경우 정밀 ISBN 검색 시도
         if is_isbn:
-            print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): ISBN 확정됨(찾은 경로={detection_source}) -> 국립중앙도서관/알라딘/구글로 정확한 서지정보부터 조회: {search_query}")
+            # 국립중앙도서관은 순위 경쟁에는 참여하지 않고, ISBN으로 정확한 제목/저자를
+            # 확보하는 "참고용"으로만 사용한다 (화면에 노출되는 후보 목록에는 포함 안 됨)
+            nlk_key = config.get("NLK_CERT_KEY")
+            if nlk_key:
+                try:
+                    nlk_ref_items = search_nlk_isbn(search_query, nlk_key)
+                    if nlk_ref_items:
+                        ref = nlk_ref_items[0]
+                        print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): 국립중앙도서관 참고정보 -> "
+                              f"제목='{ref.get('title', '')}' 저자='{ref.get('author', '')}' (순위 경쟁에는 미포함, 참고용)")
+                    else:
+                        print("[UnifiedBook] 4단계(ISBN 정밀 조회): 국립중앙도서관에 해당 ISBN 정보 없음")
+                except Exception as e:
+                    print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): 국립중앙도서관 참고 조회 실패: {e}")
+            else:
+                print("[UnifiedBook] 4단계(ISBN 정밀 조회): 국립중앙도서관 인증키 미설정 -> 참고 조회 건너뜀")
+
+            # ISBN이 일치하면 제목과 무관하게 채택. 알라딘 -> 구글 순으로 우선순위 고정
+            # (교보문고/리디북스는 ISBN 조회가 불가능하므로 이 경쟁에는 관여하지 않음)
+            print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): 알라딘 -> 구글 순으로 ISBN 일치 도서 조회: {search_query}")
             sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
-                ('국립중앙도서관', search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
                 ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
-                ('교보문고', search_kyobo_isbn, ()),
-                ('리디북스', search_ridi_isbn, ())
             ]
-            results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
+            results = _execute_search(sources_isbn, search_query, is_isbn_mode=True,
+                                       source_order=['알라딘', '구글'])
             print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): ISBN으로 찾은 결과 {len(results)}건")
 
         # 2차 백업 검색 (Fallback):
-        # ISBN 검색 결과가 없거나 실패한 경우 즉시 전처리 정제된 원래 책 제목 검색으로 Fallback 전환
+        # ISBN 검색 결과가 없거나 실패한 경우, 제목+저자 검색으로 전환
         if not results:
-            print(f"[UnifiedBook] 4단계(ISBN 정밀 조회): ISBN으로는 결과가 없어서 제목 검색으로 전환: '{clean_query_base}'")
+            print(f"[UnifiedBook] 4단계(제목+저자 검색): ISBN으로는 결과가 없어서 제목+저자 검색으로 전환: '{clean_query_base}'")
+
+            # 저자 필터의 기준(reference)을 정하기 위해 최우선순위 소스(알라딘)를 먼저 단독 조회.
+            # 알라딘 자체는 뒤이은 5단계 병렬 검색에서 다시 한번 조회되므로 약간의 중복 호출이 있지만,
+            # 로직을 단순하게 유지하기 위한 의도적인 선택이다.
+            reference_author = ''
+            try:
+                probe_items = search_aladin(clean_query_base, config.get("ALADIN_KEY"))
+                if probe_items:
+                    reference_author = probe_items[0].get('author', '')
+                    print(f"[UnifiedBook] 4단계(제목+저자 검색): 알라딘 결과의 저자='{reference_author}' 를 기준 저자로 채택 "
+                          f"(이후 이 저자와 다른 도서는 제외)")
+                else:
+                    print("[UnifiedBook] 4단계(제목+저자 검색): 알라딘에 결과가 없어 기준 저자를 못 정함 -> 저자 필터 없이 진행")
+            except Exception as e:
+                print(f"[UnifiedBook] 4단계(제목+저자 검색): 알라딘 사전 조회 실패({e}) -> 저자 필터 없이 진행")
+
+            # 국립중앙도서관은 ISBN 기반 제목 확보가 목적이므로, ISBN이 없는 이 상태에는 관여하지 않음
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
-                ('국립중앙도서관', search_nlk, (config.get("NLK_CERT_KEY"),)),
-                ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
                 ('교보문고', search_kyobo, ()),
-                ('리디북스', search_ridi, ())
+                ('리디북스', search_ridi, ()),
+                ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
             ]
-            results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
+            results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False,
+                                       source_order=['알라딘', '교보문고', '리디북스', '구글'],
+                                       author_filter=reference_author or None)
 
         print(f"[UnifiedBook] ===== 검색 종료 | 최종 {len(results)}건 반환 =====")
         return results
