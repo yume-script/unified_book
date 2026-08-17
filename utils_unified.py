@@ -2,6 +2,8 @@
 import os
 import re
 import sys
+import time
+import socket
 import zipfile
 import html
 import json
@@ -110,8 +112,50 @@ def compare_isbns(isbn_a, isbn_b):
         
     return False
 
+def _llm_post_with_retry(url, payload, headers, timeout, label, max_attempts=3, backoff_base=1.5):
+    """LLM 엔드포인트 공통 HTTP POST 재시도 헬퍼.
+
+    - 타임아웃/연결 실패/DNS 오류 등 '일시적' 통신 오류나 5xx 서버 오류는
+      짧은 대기 후 재시도한다 (기본 최대 3회, 시도마다 대기시간 증가).
+    - 401/403/429 등 4xx 오류(인증 실패, 요청 형식 오류, 레이트리밋 등)는
+      재시도해도 결과가 달라지지 않으므로 즉시 중단한다.
+    - 응답 JSON 파싱 실패 등 코드/데이터 문제도 재시도 없이 즉시 중단한다.
+    반환값: (성공 시 파싱된 JSON, 실패 사유 문자열 또는 None)
+    """
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode('utf-8')), None
+        except urllib.error.HTTPError as he:
+            error_msg = he.read().decode('utf-8', errors='ignore')
+            print(f"[UnifiedBook:ISBN추출] AI({label}) HTTP 에러 {he.code} (시도 {attempt}/{max_attempts}): {error_msg[:300]}", file=sys.stderr)
+            last_err = f"HTTP {he.code}"
+            if 400 <= he.code < 500:
+                # 인증/요청 형식/레이트리밋 등은 재시도해도 소용없으므로 즉시 중단
+                return None, last_err
+        except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as ue:
+            # DNS 실패, 연결 거부/리셋, 타임아웃 등 네트워크/통신 계층 오류 -> 재시도 대상
+            print(f"[UnifiedBook:ISBN추출] AI({label}) 통신 오류 (시도 {attempt}/{max_attempts}): {ue}", file=sys.stderr)
+            last_err = f"통신 오류: {ue}"
+        except Exception as e:
+            # JSON 파싱 실패 등 응답/코드 문제는 재시도해도 동일하게 실패할 가능성이 높음
+            print(f"[UnifiedBook:ISBN추출] AI({label}) 예기치 않은 오류 (시도 {attempt}/{max_attempts}): {e}", file=sys.stderr)
+            return None, str(e)
+
+        if attempt < max_attempts:
+            wait = backoff_base * attempt
+            print(f"[UnifiedBook:ISBN추출] AI({label}) {wait:.1f}초 후 재시도 ({attempt}/{max_attempts})...")
+            time.sleep(wait)
+
+    print(f"[UnifiedBook:ISBN추출] AI({label}) {max_attempts}회 재시도 모두 실패: {last_err}")
+    return None, last_err
+
+
 def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
-    """구글 Gemini API 및 LiteLLM(OpenAI 호환) 프록시를 모두 지원하는 통합 지능형 판독 엔진"""
+    """구글 Gemini API 및 LiteLLM(OpenAI 호환) 프록시를 모두 지원하는 통합 지능형 판독 엔진.
+    타임아웃/연결 오류 등 일시적 통신 장애에 대해서는 짧은 대기 후 최대 3회까지 자동 재시도한다."""
     if not text.strip():
         return None
 
@@ -120,30 +164,17 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
           f"모델={model or ('gemini/gemini-3.5-flash-lite' if use_litellm else 'gemini-3.5-flash-lite')}, "
           f"입력 텍스트 길이={len(text)}자)")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
-    
     prompt = (
         "다음 도서 판권지/본문 텍스트에서 ISBN 번호만 추출해줘.\n"
         "출력은 반드시 다른 미사여구 없이 JSON 형식으로만 해야 하며, 그 구조는 반드시 다음 스키마를 따라야 해:\n"
         "{\"isbn\": \"공백이나 하이픈을 제거한 오직 10자리 또는 13자리 숫자(마지막 X 허용) 문자열 (발견되지 않으면 빈 문자열)\"}\n\n"
         f"[텍스트 본문]\n{text}"
     )
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.1,
-            "maxOutputTokens": 100
-        }
-    }
-    
-    if endpoint and endpoint.strip():
+
+    if use_litellm:
         url = endpoint.strip()
         target_model = model.strip() if model and model.strip() else "gemini/gemini-3.5-flash-lite"
-        
+
         payload = {
             "model": target_model,
             "messages": [
@@ -152,72 +183,77 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
             "temperature": 0.1,
             "response_format": {"type": "json_object"}
         }
-        
+
         headers = {'Content-Type': 'application/json'}
         if api_key and api_key.strip():
             headers['Authorization'] = f"Bearer {api_key.strip()}"
-            
-        try:
-            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as response:
-                res_data = json.loads(response.read().decode('utf-8'))
-                choices = res_data.get('choices', [])
-                if choices:
-                    raw_content = choices[0].get('message', {}).get('content', '').strip()
-                    res_json = json.loads(raw_content)
-                    raw_isbn = res_json.get('isbn', '')
-                    clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
-                    if validate_isbn13(clean) or validate_isbn10(clean):
-                        print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 판독 성공 -> {clean}")
-                        return clean
-                    print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 응답에서 유효한 ISBN을 찾지 못함 (원본 응답값: {raw_isbn!r})")
-                else:
-                    print("[UnifiedBook:ISBN추출] AI(LiteLLM) 응답에 choices가 없음")
-        except urllib.error.HTTPError as he:
-            error_msg = he.read().decode('utf-8', errors='ignore')
-            print(f"[LiteLLM API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
-            print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 호출 실패 (HTTP {he.code})")
-        except Exception as e:
-            print(f"[LiteLLM API 에러] 사유: {str(e)}", file=sys.stderr)
-            print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 호출 실패: {e}")
+
+        res_data, err = _llm_post_with_retry(url, payload, headers, timeout=15, label="LiteLLM")
+        if res_data is None:
+            print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 호출 최종 실패: {err}")
+            return None
+
+        choices = res_data.get('choices', [])
+        if choices:
+            raw_content = choices[0].get('message', {}).get('content', '').strip()
+            try:
+                res_json = json.loads(raw_content)
+            except (ValueError, TypeError):
+                print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 응답 JSON 파싱 실패 (원본: {raw_content[:200]!r})")
+                return None
+            raw_isbn = res_json.get('isbn', '')
+            clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
+            if validate_isbn13(clean) or validate_isbn10(clean):
+                print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 판독 성공 -> {clean}")
+                return clean
+            print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 응답에서 유효한 ISBN을 찾지 못함 (원본 응답값: {raw_isbn!r})")
+        else:
+            print("[UnifiedBook:ISBN추출] AI(LiteLLM) 응답에 choices가 없음")
+        return None
 
     else:
         if not api_key:
             print("[UnifiedBook:ISBN추출] Gemini API Key 미설정 -> AI 위탁 건너뜀")
             return None
-        try:
-            req = urllib.request.Request(
-                url, 
-                data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}
-            )
-            with urllib.request.urlopen(req, timeout=12) as response:
-                res_data = json.loads(response.read().decode('utf-8'))
-                candidates = res_data.get('candidates', [])
-                if candidates:
-                    parts = candidates[0].get('content', {}).get('parts', [])
-                    if parts:
-                        raw_text = parts[0].get('text', '').strip()
-                        res_json = json.loads(raw_text)
-                        raw_isbn = res_json.get('isbn', '')
-                        clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
-                        if validate_isbn13(clean) or validate_isbn10(clean):
-                            print(f"[UnifiedBook:ISBN추출] AI(Gemini) 판독 성공 -> {clean}")
-                            return clean
-                        print(f"[UnifiedBook:ISBN추출] AI(Gemini) 응답에서 유효한 ISBN을 찾지 못함 (원본 응답값: {raw_isbn!r})")
-                    else:
-                        print("[UnifiedBook:ISBN추출] AI(Gemini) 응답에 parts가 없음")
-                else:
-                    print("[UnifiedBook:ISBN추출] AI(Gemini) 응답에 candidates가 없음")
-        except urllib.error.HTTPError as he:
-            error_msg = he.read().decode('utf-8', errors='ignore')
-            print(f"[Gemini API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
-            print(f"[UnifiedBook:ISBN추출] AI(Gemini) 호출 실패 (HTTP {he.code})")
-        except Exception as e:
-            print(f"[Gemini API 에러] 사유: {str(e)}", file=sys.stderr)
-            print(f"[UnifiedBook:ISBN추출] AI(Gemini) 호출 실패: {e}")
-            
-    return None
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": 0.1,
+                "maxOutputTokens": 100
+            }
+        }
+
+        res_data, err = _llm_post_with_retry(url, payload, {'Content-Type': 'application/json'}, timeout=15, label="Gemini")
+        if res_data is None:
+            print(f"[UnifiedBook:ISBN추출] AI(Gemini) 호출 최종 실패: {err}")
+            return None
+
+        candidates = res_data.get('candidates', [])
+        if candidates:
+            parts = candidates[0].get('content', {}).get('parts', [])
+            if parts:
+                raw_text = parts[0].get('text', '').strip()
+                try:
+                    res_json = json.loads(raw_text)
+                except (ValueError, TypeError):
+                    print(f"[UnifiedBook:ISBN추출] AI(Gemini) 응답 JSON 파싱 실패 (원본: {raw_text[:200]!r})")
+                    return None
+                raw_isbn = res_json.get('isbn', '')
+                clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
+                if validate_isbn13(clean) or validate_isbn10(clean):
+                    print(f"[UnifiedBook:ISBN추출] AI(Gemini) 판독 성공 -> {clean}")
+                    return clean
+                print(f"[UnifiedBook:ISBN추출] AI(Gemini) 응답에서 유효한 ISBN을 찾지 못함 (원본 응답값: {raw_isbn!r})")
+            else:
+                print("[UnifiedBook:ISBN추출] AI(Gemini) 응답에 parts가 없음")
+        else:
+            print("[UnifiedBook:ISBN추출] AI(Gemini) 응답에 candidates가 없음")
+        return None
 
 def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_model=None):
     """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (지능형 LLM 듀얼 분기 가동)"""
