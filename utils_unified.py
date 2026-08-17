@@ -58,6 +58,10 @@ def get_high_res_url(url, source):
         # og:image URL의 리사이즈 파라미터(예: fname=...&pat=... 뒤 크기 지정)는
         # 이미 원본 상세페이지에서 제공하는 값이라 별도 치환 없이 그대로 사용한다.
         pass
+    elif source == '리디북스':
+        # ridi.py에서 이미 최고해상도(xxlarge) CDN URL로 직접 구성해서 넘기므로
+        # 별도 치환이 필요 없다.
+        pass
     return url
 
 def validate_isbn13(isbn):

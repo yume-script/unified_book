@@ -80,6 +80,23 @@ except ImportError:
         def search_kyobo_isbn(isbn, api_key=None):
             return []
 
+# 리디북스(ridi.py)도 requests에 의존하는 스크래핑(JSON) 모듈이라 동일한 방식으로
+# 별도 임포트한다. requests가 없는 환경에서도 나머지 소스는 계속 동작해야 하므로,
+# 실패 시 빈 리스트를 반환하는 자리표시 함수로 대체하고 리디북스 소스만 비활성화한다.
+try:
+    from .ridi import search_ridi, search_ridi_isbn
+except ImportError:
+    try:
+        _ridi_mod = _import_local_module("ridi")
+        search_ridi = _ridi_mod.search_ridi
+        search_ridi_isbn = _ridi_mod.search_ridi_isbn
+    except Exception as _ridi_err:
+        print(f"[UnifiedBook] 리디북스(ridi) 모듈 로드 실패 (requests 설치 확인 필요) -> 리디북스 검색 비활성화: {_ridi_err}")
+        def search_ridi(query, api_key=None):
+            return []
+        def search_ridi_isbn(isbn, api_key=None):
+            return []
+
 
 class UnifiedBookMetadataProvider(BaseMetadataProvider):
     id = "unified_book"
@@ -277,7 +294,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
                 ('국립중앙도서관', search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
                 ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
-                ('교보문고', search_kyobo_isbn, ())
+                ('교보문고', search_kyobo_isbn, ()),
+                ('리디북스', search_ridi_isbn, ())
             ]
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
             print(f"[UnifiedBook] [2단계:정본 조회] ISBN 조회 결과 {len(results)}건")
@@ -290,7 +308,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
                 ('국립중앙도서관', search_nlk, (config.get("NLK_CERT_KEY"),)),
                 ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
-                ('교보문고', search_kyobo, ())
+                ('교보문고', search_kyobo, ()),
+                ('리디북스', search_ridi, ())
             ]
             results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
 
