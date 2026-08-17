@@ -114,7 +114,12 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
     """구글 Gemini API 및 LiteLLM(OpenAI 호환) 프록시를 모두 지원하는 통합 지능형 판독 엔진"""
     if not text.strip():
         return None
-        
+
+    use_litellm = bool(endpoint and endpoint.strip())
+    print(f"[UnifiedBook:ISBN추출] AI 위탁 호출 시작 (경로={'LiteLLM' if use_litellm else 'Gemini 공식'}, "
+          f"모델={model or ('gemini/gemini-3.5-flash-lite' if use_litellm else 'gemini-3.5-flash-lite')}, "
+          f"입력 텍스트 길이={len(text)}자)")
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
     
     prompt = (
@@ -163,15 +168,22 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
                     raw_isbn = res_json.get('isbn', '')
                     clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
                     if validate_isbn13(clean) or validate_isbn10(clean):
+                        print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 판독 성공 -> {clean}")
                         return clean
+                    print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 응답에서 유효한 ISBN을 찾지 못함 (원본 응답값: {raw_isbn!r})")
+                else:
+                    print("[UnifiedBook:ISBN추출] AI(LiteLLM) 응답에 choices가 없음")
         except urllib.error.HTTPError as he:
             error_msg = he.read().decode('utf-8', errors='ignore')
             print(f"[LiteLLM API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
+            print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 호출 실패 (HTTP {he.code})")
         except Exception as e:
             print(f"[LiteLLM API 에러] 사유: {str(e)}", file=sys.stderr)
+            print(f"[UnifiedBook:ISBN추출] AI(LiteLLM) 호출 실패: {e}")
 
     else:
         if not api_key:
+            print("[UnifiedBook:ISBN추출] Gemini API Key 미설정 -> AI 위탁 건너뜀")
             return None
         try:
             req = urllib.request.Request(
@@ -190,17 +202,26 @@ def extract_isbn_via_llm(text, api_key, endpoint=None, model=None):
                         raw_isbn = res_json.get('isbn', '')
                         clean = re.sub(r'[^0-9X]', '', str(raw_isbn).upper())
                         if validate_isbn13(clean) or validate_isbn10(clean):
+                            print(f"[UnifiedBook:ISBN추출] AI(Gemini) 판독 성공 -> {clean}")
                             return clean
+                        print(f"[UnifiedBook:ISBN추출] AI(Gemini) 응답에서 유효한 ISBN을 찾지 못함 (원본 응답값: {raw_isbn!r})")
+                    else:
+                        print("[UnifiedBook:ISBN추출] AI(Gemini) 응답에 parts가 없음")
+                else:
+                    print("[UnifiedBook:ISBN추출] AI(Gemini) 응답에 candidates가 없음")
         except urllib.error.HTTPError as he:
             error_msg = he.read().decode('utf-8', errors='ignore')
             print(f"[Gemini API HTTP 에러 {he.code}] 이유: {error_msg}", file=sys.stderr)
+            print(f"[UnifiedBook:ISBN추출] AI(Gemini) 호출 실패 (HTTP {he.code})")
         except Exception as e:
             print(f"[Gemini API 에러] 사유: {str(e)}", file=sys.stderr)
+            print(f"[UnifiedBook:ISBN추출] AI(Gemini) 호출 실패: {e}")
             
     return None
 
 def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_model=None):
     """EPUB 내부 컨테이너 구조 및 본문 파일 분석 후 ISBN 추출 (지능형 LLM 듀얼 분기 가동)"""
+    print(f"[UnifiedBook:ISBN추출] EPUB 판권지 스캔 시작: {epub_path!r}")
     try:
         with zipfile.ZipFile(epub_path, 'r') as epub:
             container_content = epub.read('META-INF/container.xml')
@@ -220,6 +241,7 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                 if elem.tag.endswith('identifier') and elem.text:
                     clean = re.sub(r'[^0-9X]', '', elem.text.upper())
                     if validate_isbn13(clean) or validate_isbn10(clean):
+                        print(f"[UnifiedBook:ISBN추출] EPUB OPF 메타데이터(identifier)에서 ISBN 발견 -> {clean}")
                         return clean, "LOCAL"
             
             manifest = {}
@@ -261,6 +283,7 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                     except Exception:
                         pass
             if len(re.sub(r'\s', '', sample_epub_text)) < 20:
+                print("[UnifiedBook:ISBN추출] EPUB 본문 샘플이 너무 짧아(20자 미만) 스캔 중단")
                 return None, None
             
             isbn_pat = re.compile(r'\b(?:97[89][-\s.]?)?\d{1,5}[-\s.]?\d{1,7}[-\s.]?\d{1,6}[-\s.]?[\dX]\b')
@@ -287,6 +310,7 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                         for match in isbn_pat.findall(text_content):
                             clean = re.sub(r'[^0-9X]', '', match.upper())
                             if validate_isbn13(clean) or validate_isbn10(clean):
+                                print(f"[UnifiedBook:ISBN추출] EPUB 본문 정규식 스캔에서 ISBN 발견 -> {clean}")
                                 return clean, "LOCAL"
                             elif validate_isbn10(clean):
                                 isbn10_candidates.append(clean)
@@ -294,13 +318,18 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
                         pass
                         
             if isbn10_candidates:
+                print(f"[UnifiedBook:ISBN추출] EPUB 정규식 완전일치는 없었지만 ISBN-10 후보 채택 -> {isbn10_candidates[0]}")
                 return isbn10_candidates[0], "LOCAL"
                 
             if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
+                print("[UnifiedBook:ISBN추출] EPUB 정규식 스캔 실패 -> AI(LLM)에게 판독 위탁")
                 full_text = "\n".join(compiled_texts)[:12000]
                 llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
                 if llm_isbn:
                     return llm_isbn, "AI"
+                print("[UnifiedBook:ISBN추출] AI 위탁도 실패 -> ISBN 추출 최종 실패")
+            elif compiled_texts:
+                print("[UnifiedBook:ISBN추출] 정규식 스캔 실패했지만 LLM API Key/엔드포인트 미설정 -> AI 위탁 건너뜀")
                     
     except Exception:
         pass
@@ -308,7 +337,9 @@ def extract_isbn_from_epub(epub_path, gemini_key=None, llm_endpoint=None, llm_mo
 
 def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_model=None):
     """PDF 메타데이터 및 전후면 판권 페이지 고속 스캔 (지능형 LLM 듀얼 분기 가동)"""
+    print(f"[UnifiedBook:ISBN추출] PDF 판권지 스캔 시작: {pdf_path!r}")
     if not PYPDF_AVAILABLE:
+        print("[UnifiedBook:ISBN추출] pypdf 미설치 -> PDF 스캔 건너뜀")
         return None, None
         
     try:
@@ -335,6 +366,7 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 except Exception:
                     pass
             if not sample_text.strip():
+                print("[UnifiedBook:ISBN추출] PDF 본문 샘플 추출 실패(빈 텍스트) -> 스캔 중단")
                 return None, None
                 
             pages_to_scan = list(range(min(30, num_pages)))
@@ -359,18 +391,24 @@ def extract_isbn_from_pdf(pdf_path, gemini_key=None, llm_endpoint=None, llm_mode
                 for match in isbn_pat.findall(text):
                     clean = re.sub(r'[^0-9X]', '', match.upper())
                     if validate_isbn13(clean):
+                        print(f"[UnifiedBook:ISBN추출] PDF 본문 정규식 스캔에서 ISBN 발견 -> {clean}")
                         return clean, "LOCAL"
                     elif validate_isbn10(clean):
                         isbn10_candidates.append(clean)
                         
             if isbn10_candidates:
+                print(f"[UnifiedBook:ISBN추출] PDF 정규식 완전일치는 없었지만 ISBN-10 후보 채택 -> {isbn10_candidates[0]}")
                 return isbn10_candidates[0], "LOCAL"
                 
             if (gemini_key or (llm_endpoint and llm_endpoint.strip())) and compiled_texts:
+                print("[UnifiedBook:ISBN추출] PDF 정규식 스캔 실패 -> AI(LLM)에게 판독 위탁")
                 full_text = "\n".join(compiled_texts)[:12000]
                 llm_isbn = extract_isbn_via_llm(full_text, gemini_key, endpoint=llm_endpoint, model=llm_model)
                 if llm_isbn:
                     return llm_isbn, "AI"
+                print("[UnifiedBook:ISBN추출] AI 위탁도 실패 -> ISBN 추출 최종 실패")
+            elif compiled_texts:
+                print("[UnifiedBook:ISBN추출] 정규식 스캔 실패했지만 LLM API Key/엔드포인트 미설정 -> AI 위탁 건너뜀")
                     
     except Exception:
         pass
