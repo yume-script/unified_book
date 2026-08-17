@@ -62,6 +62,24 @@ except ImportError:
     get_row_val = _utils_mod.get_row_val
     parse_bool = _utils_mod.parse_bool
 
+# 교보문고(kyobo.py)는 requests/lxml에 의존하는 스크래핑 모듈이라 별도로 임포트한다.
+# 두 패키지가 설치되어 있지 않은 환경에서도 unified_book 플러그인 자체(알라딘/
+# 국립중앙도서관/구글)는 정상 동작해야 하므로, 실패 시 빈 리스트를 반환하는
+# 자리표시 함수로 대체하고 교보문고 소스만 비활성화한다.
+try:
+    from .kyobo import search_kyobo, search_kyobo_isbn
+except ImportError:
+    try:
+        _kyobo_mod = _import_local_module("kyobo")
+        search_kyobo = _kyobo_mod.search_kyobo
+        search_kyobo_isbn = _kyobo_mod.search_kyobo_isbn
+    except Exception as _kyobo_err:
+        print(f"[UnifiedBook] 교보문고(kyobo) 모듈 로드 실패 (requests/lxml 설치 확인 필요) -> 교보문고 검색 비활성화: {_kyobo_err}")
+        def search_kyobo(query, api_key=None):
+            return []
+        def search_kyobo_isbn(isbn, api_key=None):
+            return []
+
 
 class UnifiedBookMetadataProvider(BaseMetadataProvider):
     id = "unified_book"
@@ -258,7 +276,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             sources_isbn = [
                 ('알라딘', search_aladin_isbn, (config.get("ALADIN_KEY"),)),
                 ('국립중앙도서관', search_nlk_isbn, (config.get("NLK_CERT_KEY"),)),
-                ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
+                ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
+                ('교보문고', search_kyobo_isbn, ())
             ]
             results = _execute_search(sources_isbn, search_query, is_isbn_mode=True)
             print(f"[UnifiedBook] [2단계:정본 조회] ISBN 조회 결과 {len(results)}건")
@@ -270,7 +289,8 @@ class UnifiedBookMetadataProvider(BaseMetadataProvider):
             sources_title = [
                 ('알라딘', search_aladin, (config.get("ALADIN_KEY"),)),
                 ('국립중앙도서관', search_nlk, (config.get("NLK_CERT_KEY"),)),
-                ('구글', search_google, (config.get("GOOGLE_API_KEY"),))
+                ('구글', search_google, (config.get("GOOGLE_API_KEY"),)),
+                ('교보문고', search_kyobo, ())
             ]
             results = _execute_search(sources_title, clean_query_base, is_isbn_mode=False)
 

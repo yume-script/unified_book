@@ -54,6 +54,10 @@ def get_high_res_url(url, source):
     elif source == '구글':
         url = url.replace('zoom=1', 'zoom=3').replace('zoom=5', 'zoom=3')
         if 'edge=curl' in url: url = url.replace('edge=curl', '')
+    elif source == '교보문고':
+        # og:image URL의 리사이즈 파라미터(예: fname=...&pat=... 뒤 크기 지정)는
+        # 이미 원본 상세페이지에서 제공하는 값이라 별도 치환 없이 그대로 사용한다.
+        pass
     return url
 
 def validate_isbn13(isbn):
