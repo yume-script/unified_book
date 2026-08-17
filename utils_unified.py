@@ -4,6 +4,7 @@ import re
 import sys
 import time
 import socket
+import threading
 import zipfile
 import html
 import json
@@ -112,6 +113,20 @@ def compare_isbns(isbn_a, isbn_b):
         
     return False
 
+def _do_http_request(url, payload, headers, timeout, result_box):
+    """실제 HTTP 요청 1회를 수행하는 내부 함수. 데몬 스레드에서 실행되어,
+    DNS 조회처럼 urllib의 timeout 파라미터가 못 미치는 지연이 발생해도
+    메인 흐름(search()/apply())이 함께 묶여서 멈추지 않게 한다."""
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            result_box['data'] = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as he:
+        result_box['error'] = ('http', he.code, he.read().decode('utf-8', errors='ignore'))
+    except Exception as e:
+        result_box['error'] = ('other', e)
+
+
 def _llm_post_with_retry(url, payload, headers, timeout, label, max_attempts=2, backoff_base=1.0):
     """LLM 엔드포인트 공통 HTTP POST 재시도 헬퍼.
 
@@ -123,32 +138,55 @@ def _llm_post_with_retry(url, payload, headers, timeout, label, max_attempts=2, 
     - ⚠️ search()/apply()는 사용자 요청에 동기적으로 응답해야 하므로, 이 함수의
       "타임아웃 × 시도횟수 + 대기시간" 합계가 nginx/gunicorn 등 리버스 프록시나
       WSGI 워커의 요청 타임아웃(보통 30~60초)을 넘지 않도록 기본값을 보수적으로
-      유지한다. 필요 이상으로 늘리면 정상 요청도 프록시 타임아웃에 잘려 나가면서
-      Python 예외 없이(traceback 없이) "서버와 통신 중 오류가 발생했습니다"만
-      뜨는 증상이 재현될 수 있다.
+      유지한다.
+    - ⚠️⚠️ urllib.request.urlopen(timeout=N)의 timeout은 소켓이 만들어진 *이후*
+      (연결/응답 대기)에만 적용되고, 그 이전의 DNS 조회(getaddrinfo)는 전혀
+      제어하지 못한다. 도커 환경에서 DNS가 응답을 안 하거나 방화벽이 요청을
+      조용히 버리면 이 단계에서 Python 예외도, 타임아웃도 없이 무한정 멈출 수
+      있다. 이를 막기 위해 실제 요청은 데몬 스레드에서 실행하고, 메인 스레드는
+      `timeout + 3초`가 지나도 응답이 없으면 그 스레드를 기다리지 않고 그냥
+      포기한다(스레드 자체는 백그라운드에 남아 있다가 언젠가 끝나거나, 데몬이므로
+      프로세스 종료를 막지도 않는다). 이 하드 타임아웃이 바로 "AI판독: 호출 시작"
+      로그는 찍혔는데 그 다음이 한참 안 나오는 증상에 대한 안전장치다.
     반환값: (성공 시 파싱된 JSON, 실패 사유 문자열 또는 None)
     """
     last_err = None
+    hard_budget = timeout + 3  # DNS 조회 지연까지 흡수할 최종 강제 포기 시한
+
     for attempt in range(1, max_attempts + 1):
-        try:
-            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                return json.loads(response.read().decode('utf-8')), None
-        except urllib.error.HTTPError as he:
-            error_msg = he.read().decode('utf-8', errors='ignore')
-            print(f"[UnifiedBook] AI판독({label}) HTTP 에러 {he.code} (시도 {attempt}/{max_attempts}): {error_msg[:300]}", file=sys.stderr)
-            last_err = f"HTTP {he.code}"
-            if 400 <= he.code < 500:
-                # 인증/요청 형식/레이트리밋 등은 재시도해도 소용없으므로 즉시 중단
-                return None, last_err
-        except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as ue:
-            # DNS 실패, 연결 거부/리셋, 타임아웃 등 네트워크/통신 계층 오류 -> 재시도 대상
-            print(f"[UnifiedBook] AI판독({label}) 통신 오류 (시도 {attempt}/{max_attempts}): {ue}", file=sys.stderr)
-            last_err = f"통신 오류: {ue}"
-        except Exception as e:
-            # JSON 파싱 실패 등 응답/코드 문제는 재시도해도 동일하게 실패할 가능성이 높음
-            print(f"[UnifiedBook] AI판독({label}) 예기치 않은 오류 (시도 {attempt}/{max_attempts}): {e}", file=sys.stderr)
-            return None, str(e)
+        result_box = {}
+        th = threading.Thread(target=_do_http_request, args=(url, payload, headers, timeout, result_box), daemon=True)
+        th.start()
+        th.join(timeout=hard_budget)
+
+        if th.is_alive():
+            # hard_budget초가 지나도 스레드가 안 끝남 -> DNS 조회 등에서 멈춘 것으로 보고 강제 포기
+            # (스레드는 데몬이라 여기서 join을 그만둬도 프로세스 종료를 막지 않음)
+            print(f"[UnifiedBook] AI판독({label}) {hard_budget}초 내에 응답이 없어 강제로 포기합니다 "
+                  f"(DNS 조회 지연 등 urllib timeout이 못 막는 구간에서 멈춘 것으로 추정) (시도 {attempt}/{max_attempts})",
+                  file=sys.stderr)
+            last_err = f"{hard_budget}초 하드 타임아웃 초과 (DNS/연결 지연 의심)"
+        elif 'data' in result_box:
+            return result_box['data'], None
+        else:
+            kind = result_box.get('error', ('other', RuntimeError('알 수 없는 오류')))[0]
+            if kind == 'http':
+                _, code, body = result_box['error']
+                print(f"[UnifiedBook] AI판독({label}) HTTP 에러 {code} (시도 {attempt}/{max_attempts}): {body[:300]}", file=sys.stderr)
+                last_err = f"HTTP {code}"
+                if 400 <= code < 500:
+                    # 인증/요청 형식/레이트리밋 등은 재시도해도 소용없으므로 즉시 중단
+                    return None, last_err
+            else:
+                _, e = result_box['error']
+                if isinstance(e, (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError)):
+                    # DNS 실패, 연결 거부/리셋, 타임아웃 등 네트워크/통신 계층 오류 -> 재시도 대상
+                    print(f"[UnifiedBook] AI판독({label}) 통신 오류 (시도 {attempt}/{max_attempts}): {e}", file=sys.stderr)
+                    last_err = f"통신 오류: {e}"
+                else:
+                    # JSON 파싱 실패 등 응답/코드 문제는 재시도해도 동일하게 실패할 가능성이 높음
+                    print(f"[UnifiedBook] AI판독({label}) 예기치 않은 오류 (시도 {attempt}/{max_attempts}): {e}", file=sys.stderr)
+                    return None, str(e)
 
         if attempt < max_attempts:
             wait = backoff_base * attempt
