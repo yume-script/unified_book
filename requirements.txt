@@ -1,3 +1,5 @@
 requests
 lxml
 pypdf
+beautifulsoup4
+curl_cffi
